@@ -22,6 +22,7 @@ from typing import List, Optional
 from ..core.types import Bar, BreakoutSignal, Direction, DarvasBox
 from ..core.darvas_detector import DarvasDetector
 from ..core.imbalance_classifier import ImbalanceClassifier
+from ..core.htf_sma_filter import BatchHTFSMAFilter
 from ..config.strategy_config import StrategyConfig
 
 
@@ -54,6 +55,7 @@ class BacktestResult:
     total_bars: int = 0
     total_sessions: int = 0
     signals_generated: int = 0
+    signals_filtered_sma: int = 0
 
 
 def _compute_sl_price(signal: BreakoutSignal, config: StrategyConfig) -> float:
@@ -214,6 +216,14 @@ def run_backtest(bars: List[Bar],
         total_bars=len(bars),
     )
 
+    # Build HTF SMA filter (pre-computed lookup for look-ahead-safe checks)
+    sma_filter = None
+    if config.htf_sma_enabled and len(bars) > 0:
+        sma_filter = BatchHTFSMAFilter(
+            bars, config.htf_sma_bar_minutes, config.htf_sma_period,
+            gap_minutes=session_gap_minutes,
+        )
+
     sessions = split_by_sessions(bars, gap_minutes=session_gap_minutes)
     result.total_sessions = len(sessions)
 
@@ -231,6 +241,15 @@ def run_backtest(bars: List[Bar],
 
             if signal is not None:
                 result.signals_generated += 1
+
+                # HTF SMA direction filter (V11_DESIGN.md §10)
+                if sma_filter is not None:
+                    if not sma_filter.is_aligned(
+                        signal.direction, signal.breakout_price,
+                        signal.timestamp,
+                    ):
+                        result.signals_filtered_sma += 1
+                        continue
 
                 # Get volume classification
                 vol_class = classifier.classify(

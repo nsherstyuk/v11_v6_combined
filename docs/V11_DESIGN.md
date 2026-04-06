@@ -815,10 +815,10 @@ Year-by-year OOS (direct mode, 4 of 6 years positive):
 
 ### Still Open (Technical)
 
-- ~~Integrate SMA filter into main simulator and live engine~~ → **Design decided** (see §10), build pending (Phase 1)
+- ~~Integrate SMA filter into main simulator and live engine~~ → **✅ COMPLETE** (Phase 1 done: `core/htf_sma_filter.py` + `simulator.py` + `live_engine.py` + 22 tests)
 - ~~Test SMA filter on XAUUSD and USDJPY~~ → **Resolved**: EURUSD is the only viable instrument for V11 signals
-- **Build 4H level detector module** — design in §12, code not yet written (Phase 2)
-- **Build retest detector module** — design in §12, code not yet written (Phase 3)
+- ~~Build 4H level detector module~~ → **✅ COMPLETE** (Phase 2 done: `core/level_detector.py` + `SwingLevel`/`LevelType` types + 23 tests)
+- ~~Build retest detector module~~ → **✅ COMPLETE** (Phase 3 done: `core/retest_detector.py` + `RetestSignal`/`RetestState` types + 27 tests)
 - **Build MultiStrategyRunner** — design in §11, code not yet written (Phase 4)
 - **V6 ORB adapter** — import from nautilus0 or copy? Decision needed (Phase 5)
 - **Combined risk management** — how to handle simultaneous XAUUSD + EURUSD positions

@@ -36,6 +36,26 @@ class StrategyConfig:
     max_hold_bars: int = 120            # time stop in bars (2 hours at 1-min)
     atr_period: int = 60                # bars for ATR computation
 
+    # HTF SMA direction filter (see V11_DESIGN.md §10)
+    htf_sma_enabled: bool = True        # enable 60-min SMA direction filter
+    htf_sma_bar_minutes: int = 60       # HTF bar period for SMA computation
+    htf_sma_period: int = 50            # SMA lookback in HTF bars
+
+    # 4H Swing Level Detector (see V11_DESIGN.md §12)
+    level_detector_enabled: bool = True # enable 4H swing level detection
+    level_htf_bar_minutes: int = 240    # HTF bar period (240 = 4H)
+    level_left_bars: int = 10           # swing detection: bars required on left
+    level_right_bars: int = 10          # swing detection: bars required on right
+    level_expiry_hours: int = 72        # levels expire after 72h (3 days)
+    level_merge_distance: float = 0.00005  # merge levels within 0.5 pips (EURUSD)
+
+    # Retest detector (see V11_DESIGN.md §12)
+    retest_min_pullback_bars: int = 10    # min bars after break before rebreak is valid
+    retest_max_pullback_bars: int = 30    # max bars for full break → rebreak cycle
+    retest_cooldown_bars: int = 60        # ignore level for N bars after entry/expiry
+    retest_sl_atr_offset: float = 0.3     # SL placed this many ATR beyond the level
+    retest_rr_ratio: float = 2.0          # TP at entry + risk × rr_ratio
+
     # Volume quality filter
     min_bar_ticks: int = 5              # min tick_count per bar in imbalance window
 

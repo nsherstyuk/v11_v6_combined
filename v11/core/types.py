@@ -23,6 +23,17 @@ class ImbalanceClassification(str, Enum):
     INDETERMINATE = "INDETERMINATE"
 
 
+class LevelType(str, Enum):
+    RESISTANCE = "resistance"
+    SUPPORT = "support"
+
+
+class RetestState(str, Enum):
+    WATCHING = "watching"
+    BROKEN = "broken"
+    RETESTING = "retesting"
+
+
 class ExitReason(str, Enum):
     SL = "SL"
     TIME_STOP = "TIME_STOP"
@@ -35,6 +46,39 @@ class TickQuality(str, Enum):
     HIGH = "HIGH"
     LOW = "LOW"
     INSUFFICIENT = "INSUFFICIENT"
+
+
+# ── Swing Level ────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class SwingLevel:
+    """A detected swing high/low from higher-timeframe bars.
+
+    Represents a significant support or resistance level identified by the
+    SwingLevelDetector. Immutable once detected.
+    """
+    price: float
+    level_type: LevelType
+    origin_time: datetime           # timestamp of the HTF bar where the swing occurred
+    htf_bar_minutes: int            # timeframe it was detected on (e.g. 240 for 4H)
+
+
+@dataclass(frozen=True)
+class RetestSignal:
+    """Emitted by RetestDetector when a break → pullback → rebreak completes.
+
+    Contains everything needed for trade management: level, direction,
+    entry price, ATR, and timing of the break/rebreak cycle.
+    """
+    timestamp: datetime               # time of the rebreak bar
+    direction: Direction
+    level: SwingLevel                  # the level that was retested
+    breakout_price: float              # close of the rebreak bar (entry price)
+    level_price: float                 # the level's price
+    atr: float                         # current ATR at rebreak
+    break_bar_index: int               # bar index of the initial break
+    rebreak_bar_index: int             # bar index of the rebreak (entry)
+    pullback_bars: int                 # bars elapsed between break and rebreak
 
 
 # ── Bar (from v8, unchanged) ───────────────────────────────────────────────

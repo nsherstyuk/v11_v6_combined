@@ -1,6 +1,6 @@
 # Project Status — All Trading Systems
 
-**Last updated:** 2026-04-06 ET (multi-strategy architecture session)  
+**Last updated:** 2026-04-06 ET (Phase 3 build: retest detector state machine)  
 **Author:** Cascade (AI pair programmer)
 
 ---
@@ -23,6 +23,9 @@ docs/
     └── 2026-04-06_level_breakout_and_assessment.md ← Level breakout (failed) + critical assessment
     └── 2026-04-06_4h_deep_dive.md ← 4H level retest: breakthrough finding + strategy architecture
     └── 2026-04-06_multi_strategy_session.md ← V6 ORB review + multi-strategy architecture
+    └── 2026-04-06_sma_integration_session.md ← Phase 1: SMA filter integrated into simulator + live engine
+    └── 2026-04-06_level_detector_session.md ← Phase 2: 4H swing level detector built + 23 tests
+    └── 2026-04-06_retest_detector_session.md ← Phase 3: retest detector state machine + 27 tests
     └── ...future sessions...
 ```
 
@@ -134,7 +137,7 @@ utils/logger.py  — Rotating file + console logger
 ## Project 3: V11 (Multi-Strategy Portfolio — Build Phase)
 
 **Location:** `C:\ibkr_grok-_wing_agent\v11\`  
-**Status:** 🔨 Research complete. Build phase starting. Three strategies across two instruments: EURUSD Darvas+SMA (~15/yr), EURUSD 4H Level Retest (~22/yr), XAUUSD ORB (from v6, ~150/yr). Combined ~187 trades/yr. Need to build integrated pipeline, wire v6 ORB, and paper trade.  
+**Status:** 🔨 Build Phase 3 complete (retest detector built). Three strategies across two instruments: EURUSD Darvas+SMA (~15/yr), EURUSD 4H Level Retest (~22/yr), XAUUSD ORB (from v6, ~150/yr). Combined ~187 trades/yr. Next: Phase 4 (MultiStrategyRunner).  
 **Purpose:** Multi-strategy portfolio combining rule-based breakouts + volume imbalance + optional Grok LLM filter for FX/commodities.
 
 ### What We've Learned (Honest Summary)
@@ -206,13 +209,16 @@ The Darvas strategy has higher per-trade quality. The 4H level strategy has 10x 
 | Live engine | `v11/live/live_engine.py` | ✅ Complete |
 | Entry point | `v11/live/run_live.py` | ✅ Complete |
 | Config | `v11/config/` | ✅ Complete |
-| Tests | `v11/tests/` | ✅ 51 tests, all passing |
+| Tests | `v11/tests/` | ✅ 123 tests, all passing |
 | Data loader | `v11/backtest/data_loader.py` | ✅ Complete |
 | Simulator | `v11/backtest/simulator.py` | ✅ Complete |
 | Metrics | `v11/backtest/metrics.py` | ✅ Complete |
 | Grid search | `v11/backtest/grid_search.py` | ✅ Complete |
 | HTF utilities | `v11/backtest/htf_utils.py` | ✅ Complete (resampling, SMA, ADX, shared pipelines) |
 | Session filter investigation | `v11/backtest/investigate_session_filter.py` | ✅ Complete |
+| HTF SMA filter (CENTER) | `v11/core/htf_sma_filter.py` | ✅ Complete, 22 tests |
+| 4H Swing Level Detector | `v11/core/level_detector.py` | ✅ Complete, 23 tests |
+| Retest Detector (CENTER) | `v11/core/retest_detector.py` | ✅ Complete, 27 tests |
 | HTF SMA investigation | `v11/backtest/investigate_htf_sma.py` | ✅ Complete |
 | ADX filter investigation | `v11/backtest/investigate_adx_filter.py` | ✅ Complete |
 | HTF Darvas investigation | `v11/backtest/investigate_htf_darvas.py` | ✅ Complete |
@@ -466,9 +472,9 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 
 | Phase | Task | Status |
 |---|---|---|
-| 1 | Integrate 60-min SMA(50) filter into `simulator.py` and `live_engine.py` | 🔲 Pending |
-| 2 | Build 4H swing level detector module (`v11/core/level_detector.py`) | 🔲 Pending |
-| 3 | Build retest detection logic (pb=10-30 window) | 🔲 Pending |
+| 1 | Integrate 60-min SMA(50) filter into `simulator.py` and `live_engine.py` | ✅ Complete |
+| 2 | Build 4H swing level detector module (`v11/core/level_detector.py`) | ✅ Complete |
+| 3 | Build retest detection logic (pb=10-30 window) | ✅ Complete |
 | 4 | Build `MultiStrategyRunner` orchestrator (shared IBKR + risk) | 🔲 Pending |
 | 5 | Wire V6 ORB into the runner (adapter, don't modify v6) | 🔲 Pending |
 | 6 | Write tests for new modules (level detector, retest, runner) | 🔲 Pending |

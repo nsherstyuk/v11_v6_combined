@@ -19,6 +19,7 @@ from typing import Optional, List
 from ..core.types import Bar, BreakoutSignal, VolumeAnalysis, Direction
 from ..core.darvas_detector import DarvasDetector
 from ..core.imbalance_classifier import ImbalanceClassifier
+from ..core.htf_sma_filter import IncrementalHTFSMAFilter
 from ..config.strategy_config import StrategyConfig
 from ..config.live_config import InstrumentConfig, LiveConfig
 from ..execution.bar_aggregator import BarAggregator
@@ -85,6 +86,14 @@ class InstrumentEngine:
             min_bar_ticks=strategy_config.min_bar_ticks,
         )
 
+        # HTF SMA direction filter (V11_DESIGN.md §10)
+        self._sma_filter: Optional[IncrementalHTFSMAFilter] = None
+        if strategy_config.htf_sma_enabled:
+            self._sma_filter = IncrementalHTFSMAFilter(
+                bar_minutes=strategy_config.htf_sma_bar_minutes,
+                sma_period=strategy_config.htf_sma_period,
+            )
+
         # Buffer and aggregator
         self._buffer = RollingBuffer(max_size=live_config.buffer_size)
         self._aggregator = BarAggregator()
@@ -122,6 +131,8 @@ class InstrumentEngine:
         """
         self._buffer.add_bar(bar)
         self._classifier.add_bar(bar)
+        if self._sma_filter is not None:
+            self._sma_filter.add_bar(bar)
         self._bar_count += 1
 
         # Check exit first (if in trade)
@@ -151,6 +162,18 @@ class InstrumentEngine:
         if safety:
             self._log.warning(f"{self.pair_name}: SAFETY LIMIT: {safety}")
             return
+
+        # HTF SMA direction filter (V11_DESIGN.md §10)
+        if self._sma_filter is not None:
+            if not self._sma_filter.is_aligned(
+                signal.direction, signal.breakout_price,
+            ):
+                sma_val = self._sma_filter.current_sma
+                self._log.info(
+                    f"{self.pair_name}: SMA FILTER REJECTED — "
+                    f"{signal.direction.value} breakout @ {signal.breakout_price} "
+                    f"vs SMA={sma_val:.5f}")
+                return
 
         # Volume analysis enrichment
         volume = self._build_volume_analysis(signal)
@@ -292,6 +315,8 @@ class InstrumentEngine:
         self._buffer.add_bar(bar)
         self._classifier.add_bar(bar)
         self._detector.add_bar(bar)
+        if self._sma_filter is not None:
+            self._sma_filter.add_bar(bar)
         self._bar_count += 1
 
     def get_status(self) -> dict:
@@ -306,4 +331,6 @@ class InstrumentEngine:
             'in_trade': self._trade_manager.in_trade,
             'daily_trades': self._trade_manager.daily_trades,
             'daily_pnl': self._trade_manager.daily_pnl,
+            'htf_sma': self._sma_filter.current_sma if self._sma_filter else None,
+            'htf_sma_bars': self._sma_filter.htf_bars_count if self._sma_filter else 0,
         }
