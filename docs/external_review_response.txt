@@ -1,0 +1,117 @@
+Response to External Design Review — V11 Hybrid Trading System
+================================================================
+
+Thank you for the thorough review. All three critiques are valid and have been
+addressed. Here's what we did with each one.
+
+
+CRITIQUE #1: Latency Gap (Entry Drift During LLM Response)
+-----------------------------------------------------------
+Status: FIXED — implemented same day.
+
+You're right that 2-3 seconds of Grok latency on XAUUSD 1-min bars is a real
+risk. We implemented a "slippage ceiling" that checks the current price against
+the original breakout price AFTER Grok responds but BEFORE submitting the order.
+
+How it works:
+  1. Breakout signal fires → breakout_price recorded (e.g., 2050.00)
+  2. Grok is called asynchronously (~2-3 sec)
+  3. During that time, every price tick updates _last_price in the engine
+  4. Grok returns approved=true
+  5. Check: abs(current_price - breakout_price) vs (0.5 × ATR)
+  6. If drift exceeds 0.5 ATR → trade ABORTED, logged as "ENTRY DRIFT ABORT"
+  7. If within tolerance → proceed to order submission
+
+Why 0.5 ATR? A confirmed breakout is expected to follow through somewhat — you
+don't want to abort on normal momentum. But if price has already extended half
+an ATR beyond the breakout level in just 2-3 seconds, the risk/reward has
+degraded and you're chasing. The 0.5 value is tunable in LiveConfig.
+
+Example with XAUUSD (ATR ≈ $8):
+  - Max allowed drift: $4.00
+  - Price at 2051.50 (drift $1.50) → proceed
+  - Price at 2056.00 (drift $6.00) → abort
+
+Config parameter: max_entry_drift_atr = 0.5 in LiveConfig
+Code location: live_engine.py _handle_signal(), between LLM approval and enter_trade()
+
+
+CRITIQUE #2: Calendar Hallucination
+------------------------------------
+Status: ACKNOWLEDGED — deferred to pre-live gate.
+
+You're correct that Grok's training knowledge of the economic calendar is
+approximate. It knows FOMC meets roughly every 6 weeks, NFP is the first
+Friday, CPI is mid-month — but it won't know about moved meetings, surprise
+announcements, or flash events.
+
+Our current position:
+  - Decision #4 in the design doc already states: "Start with Grok training
+    knowledge, add external API later if insufficient."
+  - For backtesting and paper trading, Grok's approximate knowledge is adequate
+    because the SAME limitations exist in both backtest and live — Grok doesn't
+    have hindsight in either case.
+  - For live trading with real money, we agree: an external calendar feed must
+    be wired up first.
+
+Candidate APIs we're evaluating:
+  - ForexFactory (scraping-based, widely used)
+  - TradingEconomics (paid API, comprehensive)
+  - FCS API (free tier available)
+  - AlphaVantage (economic indicators)
+
+The SignalContext schema already has room for this — we can add an
+"upcoming_events" field that lists events within the next N hours. This would
+give Grok structured data instead of relying on memory.
+
+This is now formally listed as a "Paper → Real Money Gate" requirement: the
+calendar API must be wired up before transitioning from paper to live.
+
+
+CRITIQUE #3: Zoomed-In Bias (Higher Timeframe Context)
+-------------------------------------------------------
+Status: ACKNOWLEDGED — partially addressed, deferred to pre-live gate.
+
+You're right that 200 × 1-min bars (~3.3 hours) doesn't show Grok whether a
+bullish breakout is running into a 4-hour resistance or a Daily 200-EMA.
+
+What's already in place:
+  - SignalContext has daily_bars: Optional[List[BarData]] — designed from
+    day one for exactly this use case
+  - LiveConfig has llm_daily_bars_context: int = 30 (last 30 daily bars)
+  - The LLM prompt already tells Grok to "consider the broader context
+    (higher timeframe if available)"
+
+What's missing:
+  - The actual data pipe: fetching daily OHLC bars from IBKR's historical
+    data API and wiring them into _build_signal_context()
+  - Optionally: computing key technical levels (200-EMA, major S/R) and
+    including them as summary fields so Grok doesn't have to compute them
+    from raw bars
+
+This is straightforward to implement — the schema and prompt are ready, we
+just need to connect the data source. Also listed as a pre-live gate
+requirement.
+
+
+WATCHLIST STRATEGY COMMENT
+--------------------------
+Noted. This applies to the Swing Agent (Project 1), which trades US equities
+from a watchlist. V11 trades pre-defined FX/commodity pairs (XAUUSD, EURUSD,
+USDJPY), so watchlist strategy is not a factor here. The Swing Agent's watchlist
+improvement is tracked separately.
+
+
+SUMMARY OF ACTIONS TAKEN
+-------------------------
+  [DONE]  Critique #1: Slippage ceiling implemented (max_entry_drift_atr)
+  [GATE]  Critique #2: External calendar API — required before paper → live
+  [GATE]  Critique #3: Daily bar context — required before paper → live
+  [N/A]   Watchlist — applies to different project
+
+All changes documented in:
+  - docs/V11_DESIGN.md §9 "External Review Findings"
+  - docs/V11_DESIGN.md §8 Decision #11
+  - docs/journal/2026-04-06_session.md "External Review Findings" section
+
+51 unit tests still passing after the slippage ceiling implementation.

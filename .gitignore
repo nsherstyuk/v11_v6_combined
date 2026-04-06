@@ -1,0 +1,29 @@
+# Environment secrets
+.env
+
+# Logs (keep directory, ignore contents)
+logs/*.log
+logs/*.log.*
+grok_logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.windsurf/
+
+# Grid search CSVs (large, reproducible from code)
+v11_grid_*.csv

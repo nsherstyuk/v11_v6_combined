@@ -1,0 +1,52 @@
+It is always a bit of a gut punch to see a "Non-Final Rejection" in your inbox, but looking at the details of this Office Action, there is actually a very clear path forward for your application. The examiner’s reliance on Yagi (US 2002/0070710) for the 35 U.S.C. § 102 anticipation rejections is a standard "first pass" move, but they have also handed you a significant "win" in the form of allowable subject matter.
++3
+
+Here is an analysis of the examiner's position and the strategy for your response:
+
+1. The Section 102 Rejection (Anticipation by Yagi)
+The examiner is technically "right" from a high-level structural perspective. Yagi does indeed describe a multi-stage process:
+
+
+Stage 1: Pulsed charging and discharging where charge = discharge (pure heating).
+
+
+Stage 2: Pulsed charging and discharging where charge > discharge (heating + charging).
+
+
+Stage 3: Normal continuous current charging.
+
+Because your Claim 1 is written broadly, the examiner is mapping your "heating-optimized pulses" and "charging current" directly onto Yagi’s stages. To overcome this, you will likely need to narrow Claim 1 to include the specific technical differentiators that Yagi lacks—specifically the amplitude relationships found in your Claim 3.
++4
+
+2. The "Silver Lining": Allowable Claims 3 and 13
+The most important part of this Office Action is the Statement of Reasons for Allowance regarding Claims 3 and 13. The examiner admits that none of the prior art (including Yagi and Xi) discloses your specific amplitude relationship:
++1
+
+"...an amplitude of positive pulses comprised in the heating-optimized pulses is greater than an amplitude of positive pulses comprised in the charging-optimized pulses..." 
++1
+
+This is your core inventive step. In Yagi’s system, the pulses are generally shown as consistent in amplitude, focusing instead on pulse width or simple duty cycle adjustments. Your method of using high-amplitude pulses for I 
+2
+ R heating and then dropping the amplitude for safe/optimized charging once the reference temperature is reached is what the examiner considers unique.
++3
+
+3. The Section 103 Rejection (EIS and Xi)
+The rejection of Claims 8 and 18 (using Electrochemical Impedance Spectroscopy to set frequencies) is harder to fight purely on the merits because Xi (US 2022/0263144) is a modern reference that specifically teaches EIS for state-of-health and frequency identification. However, if these claims are rewritten to depend on the newly independent (and allowable) amplitude-based claims, the 103 rejection should effectively disappear.
++2
+
+My Recommendation
+The examiner is essentially inviting you to "close the deal." By incorporating the limitations of Claim 3 into Claim 1, and Claim 13 into Claim 11, you would likely secure an immediate Notice of Allowance.
+
+Strategic Points for your Response:
+
+
+Acknowledge Yagi, but point out that Yagi’s "Stage 2" does not account for the specific thermal management strategy of reducing amplitude to protect the battery chemistry once it is warm enough to accept a faster charge.
++1
+
+
+Argue the Synergistic Effect: Your high-amplitude heating pulses maximize Joule heat (I 
+2
+ R) specifically when the internal resistance is highest (low temp), which is a more aggressive and efficient heating strategy than Yagi’s fixed-amplitude approach.
++1
+
+Given the examiner's tone, they seem to appreciate the technical nuance of the amplitude differential—I'd suggest taking the win on Claims 3/13 and pivoting the rest of the application to support that core innovation.
