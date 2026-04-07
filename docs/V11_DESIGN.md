@@ -1,8 +1,8 @@
 # V11 Design Document — Darvas Box + Volume Imbalance + LLM Filter
 
-**Last updated:** 2026-04-06 ET (multi-strategy architecture)  
-**Status:** Research complete. Multi-strategy portfolio designed: Darvas+SMA (EURUSD) + 4H Level Retest (EURUSD) + V6 ORB (XAUUSD). Build phase starting.  
-**Related docs:** `docs/PROJECT_STATUS.md` | `docs/journal/2026-04-06_4h_deep_dive.md` | `docs/journal/2026-04-06_multi_strategy_session.md`
+**Last updated:** 2026-04-07 ET (Phase 5: V6 ORB adapter built)  
+**Status:** Build Phase 5 complete. V6 ORB adapter integrated into MultiStrategyRunner (190 total tests). Next: Phase 7 (run_live.py entry point + paper trading).  
+**Related docs:** `docs/PROJECT_STATUS.md` | `docs/journal/2026-04-07_orb_adapter_session.md` | `docs/journal/2026-04-06_multi_strategy_session.md`
 
 ---
 
@@ -700,14 +700,14 @@ MultiStrategyRunner
 - **Cross-instrument positions:** EURUSD and XAUUSD can be open simultaneously. Risk manager tracks combined exposure.
 - **Daily loss limit:** If combined losses across all strategies exceed the limit, all strategies pause for the day.
 
-### V6 ORB Adapter Design
+### V6 ORB Adapter Design — ✅ COMPLETE (Phase 5)
 
-V6 code lives in `C:\nautilus0\v6_orb_refactor\` and must not be modified. The adapter:
+V6 code lives in `C:\nautilus0\v6_orb_refactor\` (read-only reference). Frozen copies live in `v11/v6_orb/` with flattened imports. The adapter (`v11/live/orb_adapter.py`):
 
-1. Imports `ORBStrategy`, `LiveMarketContext`, `IBKRExecutionEngine` from v6
-2. Connects v6's `IBKRExecutionEngine` to the shared `IBKRConnection`
-3. Feeds XAUUSD ticks from the shared connection into v6's `LiveMarketContext`
-4. Registers v6's fill callbacks with the shared `RiskManager` and `TradeLogger`
+1. Wraps `ORBStrategy`, `LiveMarketContext`, `IBKRExecutionEngine` from `v11/v6_orb/`
+2. Connects v6's `IBKRExecutionEngine` to the shared `IBKRConnection.ib` instance
+3. V6's `LiveMarketContext` manages its own tick subscription (ib_insync deduplicates)
+4. Fill callback intercepts v6 fills → reports entries/exits to V11's `RiskManager`
 5. Handles daily reset (`strategy.reset_for_new_day()`) from the runner's clock
 
 The adapter is thin — it translates between V11's event model and V6's tick-driven interface without touching V6 internals.
@@ -819,8 +819,8 @@ Year-by-year OOS (direct mode, 4 of 6 years positive):
 - ~~Test SMA filter on XAUUSD and USDJPY~~ → **Resolved**: EURUSD is the only viable instrument for V11 signals
 - ~~Build 4H level detector module~~ → **✅ COMPLETE** (Phase 2 done: `core/level_detector.py` + `SwingLevel`/`LevelType` types + 23 tests)
 - ~~Build retest detector module~~ → **✅ COMPLETE** (Phase 3 done: `core/retest_detector.py` + `RetestSignal`/`RetestState` types + 27 tests)
-- **Build MultiStrategyRunner** — design in §11, code not yet written (Phase 4)
-- **V6 ORB adapter** — import from nautilus0 or copy? Decision needed (Phase 5)
-- **Combined risk management** — how to handle simultaneous XAUUSD + EURUSD positions
+- ~~Build MultiStrategyRunner~~ → **✅ COMPLETE** (Phase 4 done: `live/multi_strategy_runner.py` + `live/risk_manager.py` + `live/level_retest_engine.py` + 40 tests)
+- ~~Combined risk management~~ → **✅ COMPLETE** (RiskManager: combined daily loss limit, max 1 position per instrument, per-strategy trade limits)
+- ~~V6 ORB adapter~~ → **✅ COMPLETE** (Phase 5 done: copied into `v11/v6_orb/`, adapter in `v11/live/orb_adapter.py`, 27 tests)
 - **Daily bar context for LLM** (Critique #3) — SignalContext supports daily bars but no data source wired up. Priority: before live trading
 - **External economic calendar API** (Critique #2) — Grok's training knowledge is approximate. Priority: before live trading with real money

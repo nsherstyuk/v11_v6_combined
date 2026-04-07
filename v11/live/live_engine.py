@@ -104,6 +104,9 @@ class InstrumentEngine:
         # Last known price (for slippage ceiling check after LLM latency)
         self._last_price: float = 0.0
 
+        # Strategy identifier (set by MultiStrategyRunner)
+        self.strategy_name: str = "Darvas_Breakout"
+
     @property
     def pair_name(self) -> str:
         return self.inst_config.pair_name

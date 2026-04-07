@@ -35,3 +35,7 @@
 | `TradeManager` | Order submission, fill tracking, commission, SL management, CSV logging | `enter_trade(...) -> bool`, `check_exit(...) -> Optional[TradeRecord]` |
 | `IBKRConnection` | Connection lifecycle, reconnection, heartbeat, contract qualification | `connect()`, `get_mid_price()`, `submit_market_order()` |
 | `BarAggregator` | Tick-to-bar aggregation, uptick/downtick classification | `on_price(price, now) -> Optional[Bar]` |
+| `RiskManager` | Combined daily loss, position tracking, per-strategy limits | `can_trade(inst, strat) -> (bool, reason)` |
+| `LevelRetestEngine` | 4H level retest signal pipeline: levels + retest + SMA + volume + LLM | `on_bar(bar) -> None` |
+| `MultiStrategyRunner` | Strategy registration, feed routing, shared infrastructure | `on_bar(pair, bar)`, `add_*_strategy()` |
+| `InstrumentFeed` | Shared bar aggregation per instrument, routes bars to strategies | `on_price(price, now) -> Optional[Bar]`, `on_bar(bar)` |
