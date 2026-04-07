@@ -75,10 +75,31 @@ python -m v11.live.run_live --live --no-llm
 python -m v11.live.run_live --live
 ```
 
+## Critical decisions for next session
+
+### Decision #18: DIVERGENT volume must mechanically reject signals (no Grok needed)
+- Currently, volume imbalance is computed and logged but does NOT gate trade entry in --no-llm mode
+- User confirmed: DIVERGENT volume should mechanically block the signal
+- Implementation: Add a hard gate in `live_engine.py::_handle_signal()` — if `volume.classification == DIVERGENT`, reject and log
+- Same for `level_retest_engine.py` if it uses volume classification
+- This is a **one-line gate**, not a big refactor
+
+### Decision #19: No Grok LLM for now — purely mechanical
+- LLM is Stage 2 (future). All current development assumes --no-llm mode.
+- Do not add Grok dependencies to any new features.
+
+### Replay/verification constraints
+- **Volume imbalance requires tick-level data** — IBKR historical bars don't include buy/sell split
+- Bar-only replay would test everything EXCEPT volume classification (would need INDETERMINATE default)
+- Tick replay from Dukascopy (free, FX+Gold, 2003-present) would allow full volume reconstruction
+- Synthetic signal injection is the fastest way to verify order flow TODAY
+- See `docs/FEATURE_REQUESTS.md` for full analysis
+
 ## Next session should
-- Monitor overnight paper trading behavior
-- Check log files for any errors or unexpected behavior
-- Verify daily reset works at UTC midnight
-- Watch for first trade signals (Darvas ~15/yr, 4H Retest ~22/yr, ORB ~150/yr)
-- Address deferred medium-severity items from Phase 8 review
-- Stage 2: Test Grok LLM as optional enhancement
+1. **Add DIVERGENT volume gate** — mechanical rejection in `_handle_signal()` (Priority: HIGH)
+2. **Build synthetic signal injection script** — verify IBKR order flow on paper account without waiting for real signal
+3. Monitor overnight paper trading behavior
+4. Check log files for any errors or unexpected behavior
+5. Verify daily reset works at UTC midnight
+6. Consider dashboard approach (Streamlit recommended — see FEATURE_REQUESTS.md)
+7. Consider tick replay harness using Dukascopy data for EURUSD/XAUUSD
