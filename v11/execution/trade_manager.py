@@ -52,11 +52,13 @@ class TradeManager:
         log: logging.Logger,
         trade_log_dir: Path,
         dry_run: bool = True,
+        max_hold_bars: int = 120,
     ):
         self._conn = conn
         self._inst = inst
         self._log = log
         self._dry_run = dry_run
+        self._max_hold_bars = max_hold_bars
         self._trade_log_path = trade_log_dir / f"trades_{inst.pair_name.lower()}.csv"
         trade_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -186,7 +188,12 @@ class TradeManager:
                 if self._sl_order is None:
                     self._log.error(
                         f"{self._inst.pair_name}: SL ORDER FAILED TWICE — "
-                        f"POSITION OPEN WITHOUT STOP LOSS!")
+                        f"FORCE CLOSING POSITION (unhedged risk)")
+                    self._conn.close_position(
+                        self._inst.pair_name, direction.value,
+                        self._inst.quantity)
+                    self._reset_trade_state()
+                    return False
 
         return True
 
@@ -222,13 +229,10 @@ class TradeManager:
                 target_hit = True
             if target_hit:
                 return self._execute_exit(
-                    ExitReason.TIME_STOP, self.target_price, bars_held)
+                    ExitReason.TARGET, self.target_price, bars_held)
 
         # Time stop
-        from ..config.strategy_config import StrategyConfig
-        # Use a generous default; the actual config is passed during init
-        max_hold = 120
-        if bars_held >= max_hold:
+        if bars_held >= self._max_hold_bars:
             return self._execute_exit(
                 ExitReason.TIME_STOP, current_price, bars_held)
 
@@ -378,6 +382,33 @@ class TradeManager:
         self._entry_commission = 0.0
         self._entry_trade = None
         self._sl_order = None
+
+    def reconcile_position(self) -> None:
+        """Reconcile internal state with broker after reconnect.
+
+        If we think we're in a trade but broker has no position → reset.
+        If broker has a position but we don't know about it → log warning.
+        """
+        broker_pos = self._conn.get_position_size(
+            self._inst.symbol, self._inst.sec_type)
+        broker_has_pos = abs(broker_pos) > 0
+
+        if self.in_trade and not broker_has_pos:
+            self._log.warning(
+                f"{self._inst.pair_name}: RECONCILE — internal=in_trade but "
+                f"broker=flat. Resetting trade state (position was closed "
+                f"externally or SL filled during disconnect)")
+            self._reset_trade_state()
+        elif not self.in_trade and broker_has_pos:
+            self._log.warning(
+                f"{self._inst.pair_name}: RECONCILE — internal=flat but "
+                f"broker has position={broker_pos}. Orphaned position "
+                f"detected — manual intervention required")
+        else:
+            self._log.info(
+                f"{self._inst.pair_name}: RECONCILE — "
+                f"internal={'in_trade' if self.in_trade else 'flat'}, "
+                f"broker={'has_position' if broker_has_pos else 'flat'} — OK")
 
     def reset_daily(self) -> None:
         """Reset daily counters at market open."""

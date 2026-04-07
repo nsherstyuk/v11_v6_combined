@@ -1,6 +1,6 @@
 # Project Status — All Trading Systems
 
-**Last updated:** 2026-04-07 ET (Phase 5 build: V6 ORB adapter integrated into MultiStrategyRunner)  
+**Last updated:** 2026-04-06 ET (Live launch: Python 3.14 fix + LLM bypass + paper trading confirmed)  
 **Author:** Cascade (AI pair programmer)
 
 ---
@@ -28,6 +28,9 @@ docs/
     └── 2026-04-06_retest_detector_session.md ← Phase 3: retest detector state machine + 27 tests
     └── 2026-04-06_multi_strategy_runner_session.md ← Phase 4: MultiStrategyRunner + RiskManager + LevelRetestEngine + 40 tests
     └── 2026-04-07_orb_adapter_session.md ← Phase 5: V6 ORB adapter + 27 tests
+    └── 2026-04-06_phase7_run_live_session.md ← Phase 7: run_live.py multi-strategy entry point + 28 tests
+    └── 2026-04-06_phase8_critical_fixes_session.md ← Phase 8: critical fixes + trade execution tests
+    └── 2026-04-06_live_launch_session.md ← Live launch: Py3.14 fix, LLM bypass, status fix
     └── ...future sessions...
 ```
 
@@ -139,7 +142,7 @@ utils/logger.py  — Rotating file + console logger
 ## Project 3: V11 (Multi-Strategy Portfolio — Build Phase)
 
 **Location:** `C:\ibkr_grok-_wing_agent\v11\`  
-**Status:** 🔨 Build Phase 5 complete (V6 ORB adapter). Three strategies across two instruments: EURUSD Darvas+SMA (~15/yr), EURUSD 4H Level Retest (~22/yr), XAUUSD ORB (from v6, ~150/yr). Combined ~187 trades/yr. Next: Phase 7 (run_live.py entry point + paper trading).  
+**Status:** ✅ **LIVE on paper account** (port 4002). Three strategies across two instruments: EURUSD Darvas+SMA (~15/yr), EURUSD 4H Level Retest (~22/yr), XAUUSD ORB (from v6, ~150/yr). Combined ~187 trades/yr. Mechanical signals only (LLM bypass via --no-llm). Python 3.14 compatibility patched.  
 **Purpose:** Multi-strategy portfolio combining rule-based breakouts + volume imbalance + optional Grok LLM filter for FX/commodities.
 
 ### What We've Learned (Honest Summary)
@@ -209,9 +212,10 @@ The Darvas strategy has higher per-trade quality. The 4H level strategy has 10x 
 | Bar aggregator | `v11/execution/bar_aggregator.py` | ✅ Ported from v8, 10 tests |
 | Trade manager (CENTER) | `v11/execution/trade_manager.py` | ✅ Complete |
 | Live engine | `v11/live/live_engine.py` | ✅ Complete |
-| Entry point | `v11/live/run_live.py` | ✅ Complete |
+| Entry point | `v11/live/run_live.py` | ✅ Live: Py3.14 fix, --no-llm flag, status display fix |
 | Config | `v11/config/` | ✅ Complete |
-| Tests | `v11/tests/` | ✅ 190 tests, all passing |
+| Passthrough LLM | `v11/llm/passthrough_filter.py` | ✅ Mechanical auto-approve (--no-llm mode) |
+| Tests | `v11/tests/` | ✅ 263 tests, all passing |
 | Data loader | `v11/backtest/data_loader.py` | ✅ Complete |
 | Simulator | `v11/backtest/simulator.py` | ✅ Complete |
 | Metrics | `v11/backtest/metrics.py` | ✅ Complete |
@@ -483,17 +487,20 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 | 2 | Build 4H swing level detector module (`v11/core/level_detector.py`) | ✅ Complete |
 | 3 | Build retest detection logic (pb=10-30 window) | ✅ Complete |
 | 4 | Build `MultiStrategyRunner` orchestrator (shared IBKR + risk) | ✅ Complete |
-| 5 | Wire V6 ORB into the runner (adapter, don't modify v6) | 🔲 Pending |
-| 6 | Write tests for new modules (level detector, retest, runner) | 🔲 Pending |
-| 7 | Paper trade EURUSD (Darvas + 4H) + XAUUSD (ORB) | 🔲 Pending |
-| 8 | Stage 2: Test Grok LLM as optional enhancement | 🔲 Future |
+| 5 | Wire V6 ORB into the runner (adapter, don't modify v6) | ✅ Complete |
+| 6 | Write tests for new modules (level detector, retest, runner) | ✅ Complete (263 tests) |
+| 7 | Paper trade EURUSD (Darvas + 4H) + XAUUSD (ORB) | ✅ **LIVE** (mechanical, --no-llm) |
+| 8 | Critical fixes + trade execution test coverage | ✅ Complete |
+| 9 | Python 3.14 compatibility + LLM bypass | ✅ Complete |
+| 10 | Stage 2: Test Grok LLM as optional enhancement | 🔲 Future |
 
 ### Open Questions
 
 1. **Walk-forward validation** — train on rolling windows instead of fixed IS/OOS split
 2. **Execution simulation** — model slippage, spread widening, partial fills
-3. **V6 ORB adapter** — should we copy v6 code into v11, or import from nautilus0?
-4. **Combined risk management** — how to handle simultaneous XAUUSD + EURUSD positions against one daily loss limit
+3. ~~V6 ORB adapter — should we copy v6 code into v11, or import from nautilus0?~~ **RESOLVED: copied into v11/v6_orb/**
+4. ~~Combined risk management~~ **RESOLVED: RiskManager with unified daily loss limit across all strategies**
+5. **Integration replay test** — record tick stream → replay through MultiStrategyRunner → verify order flow
 
 ### Full Design
 

@@ -1,0 +1,39 @@
+2026-04-06 20:45:31  INFO     ============================================================
+2026-04-06 20:45:31  INFO     V11 — Multi-Strategy Portfolio
+2026-04-06 20:45:31  INFO       Instruments: ['EURUSD', 'XAUUSD']
+2026-04-06 20:45:31  INFO       Strategies:  Darvas+SMA, 4H Retest (EURUSD) + ORB (XAUUSD)
+2026-04-06 20:45:31  INFO       Dry-run:     False
+2026-04-06 20:45:31  INFO       LLM:         grok-4-1-fast-reasoning
+2026-04-06 20:45:31  INFO       Confidence:  >= 75
+2026-04-06 20:45:31  INFO       Daily loss:  $500
+2026-04-06 20:45:31  INFO     ============================================================
+2026-04-06 20:45:32  INFO     Connected to IBKR 127.0.0.1:4002
+2026-04-06 20:45:32  INFO     Contract qualified: EURUSD
+2026-04-06 20:45:34  INFO     Price stream started: EURUSD
+2026-04-06 20:45:34  INFO     Contract qualified: XAUUSD
+2026-04-06 20:45:36  INFO     Price stream started: XAUUSD
+2026-04-06 20:45:36  INFO     RUNNER: Added Darvas_Breakout on EURUSD
+2026-04-06 20:45:36  INFO     RUNNER: Added 4H_Level_Retest on EURUSD
+2026-04-06 20:45:36  INFO     Subscribing to tick data for XAUUSD
+2026-04-06 20:45:36  INFO     RUNNER: Added V6_ORB on XAUUSD
+2026-04-06 20:45:36  INFO     Seeding EURUSD buffer...
+2026-04-06 20:45:38  INFO     Fetched 481 historical bars for EURUSD
+2026-04-06 20:45:38  INFO     RUNNER: Seeded 481 bars on EURUSD
+2026-04-06 20:45:38  INFO     Seeding XAUUSD buffer...
+2026-04-06 20:45:38  INFO     Fetched 481 historical bars for XAUUSD
+2026-04-06 20:45:38  INFO     RUNNER: Seeded 481 bars on XAUUSD
+2026-04-06 20:45:38  INFO       ?: bars=481
+2026-04-06 20:45:38  INFO       ?: bars=481
+2026-04-06 20:45:38  INFO       V6_ORB: bars=0
+2026-04-06 20:45:38  INFO     Runner ready: 3 strategies on ['EURUSD', 'XAUUSD']
+2026-04-06 20:45:38  INFO     ORB: Daily reset for 2026-04-07
+2026-04-06 20:45:38  INFO     [RISK] PnL=$+0.00 trades=0 positions=0/3
+2026-04-06 20:45:38  INFO     [STATUS] ? on ?: bars=481 in_trade=False
+2026-04-06 20:45:38  INFO     [STATUS] ? on ?: bars=481 in_trade=False
+2026-04-06 20:45:38  INFO     [STATUS] V6_ORB on ?: bars=0 in_trade=False
+2026-04-06 20:47:44  INFO     Signal 2 received — shutting down
+2026-04-06 20:47:45  INFO     Shutting down...
+2026-04-06 20:47:45  INFO     ORB: Adapter cleanup
+2026-04-06 20:47:45  INFO     Disconnecting LiveMarketContext
+2026-04-06 20:47:45  WARNING  IBKR disconnected
+2026-04-06 20:47:45  INFO     V11 live trader stopped.

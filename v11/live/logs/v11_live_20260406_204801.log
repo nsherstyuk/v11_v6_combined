@@ -1,0 +1,47 @@
+2026-04-06 20:48:01  INFO     ============================================================
+2026-04-06 20:48:01  INFO     V11 — Multi-Strategy Portfolio
+2026-04-06 20:48:01  INFO       Instruments: ['EURUSD', 'XAUUSD']
+2026-04-06 20:48:01  INFO       Strategies:  Darvas+SMA, 4H Retest (EURUSD) + ORB (XAUUSD)
+2026-04-06 20:48:01  INFO       Dry-run:     False
+2026-04-06 20:48:01  INFO       LLM:         grok-4-1-fast-reasoning
+2026-04-06 20:48:01  INFO       Confidence:  >= 75
+2026-04-06 20:48:01  INFO       Daily loss:  $500
+2026-04-06 20:48:01  INFO     ============================================================
+2026-04-06 20:48:02  INFO     Connected to IBKR 127.0.0.1:4002
+2026-04-06 20:48:02  INFO     Contract qualified: EURUSD
+2026-04-06 20:48:04  INFO     Price stream started: EURUSD
+2026-04-06 20:48:04  INFO     Contract qualified: XAUUSD
+2026-04-06 20:48:06  INFO     Price stream started: XAUUSD
+2026-04-06 20:48:06  INFO     RUNNER: Added Darvas_Breakout on EURUSD
+2026-04-06 20:48:06  INFO     RUNNER: Added 4H_Level_Retest on EURUSD
+2026-04-06 20:48:06  INFO     Subscribing to tick data for XAUUSD
+2026-04-06 20:48:06  INFO     RUNNER: Added V6_ORB on XAUUSD
+2026-04-06 20:48:06  INFO     Seeding EURUSD buffer...
+2026-04-06 20:48:06  INFO     Fetched 481 historical bars for EURUSD
+2026-04-06 20:48:06  INFO     RUNNER: Seeded 481 bars on EURUSD
+2026-04-06 20:48:06  INFO     Seeding XAUUSD buffer...
+2026-04-06 20:48:07  INFO     Fetched 481 historical bars for XAUUSD
+2026-04-06 20:48:07  INFO     RUNNER: Seeded 481 bars on XAUUSD
+2026-04-06 20:48:07  INFO       Darvas_Breakout: bars=481
+2026-04-06 20:48:07  INFO       4H_Level_Retest: bars=481
+2026-04-06 20:48:07  INFO       V6_ORB: bars=0
+2026-04-06 20:48:07  INFO     Runner ready: 3 strategies on ['EURUSD', 'XAUUSD']
+2026-04-06 20:48:07  INFO     ORB: Daily reset for 2026-04-07
+2026-04-06 20:48:07  INFO     [RISK] PnL=$+0.00 trades=0 positions=0/3
+2026-04-06 20:48:07  INFO     [STATUS] Darvas_Breakout on EURUSD: bars=481 in_trade=False
+2026-04-06 20:48:07  INFO     [STATUS] 4H_Level_Retest on EURUSD: bars=481 in_trade=False
+2026-04-06 20:48:07  INFO     [STATUS] V6_ORB on XAUUSD: bars=0 in_trade=False
+2026-04-06 20:53:07  INFO     [RISK] PnL=$+0.00 trades=0 positions=0/3
+2026-04-06 20:53:07  INFO     [STATUS] Darvas_Breakout on EURUSD: bars=486 in_trade=False
+2026-04-06 20:53:07  INFO     [STATUS] 4H_Level_Retest on EURUSD: bars=486 in_trade=False
+2026-04-06 20:53:07  INFO     [STATUS] V6_ORB on XAUUSD: bars=0 in_trade=False
+2026-04-06 20:58:07  INFO     [RISK] PnL=$+0.00 trades=0 positions=0/3
+2026-04-06 20:58:07  INFO     [STATUS] Darvas_Breakout on EURUSD: bars=491 in_trade=False
+2026-04-06 20:58:07  INFO     [STATUS] 4H_Level_Retest on EURUSD: bars=491 in_trade=False
+2026-04-06 20:58:07  INFO     [STATUS] V6_ORB on XAUUSD: bars=0 in_trade=False
+2026-04-06 21:03:05  INFO     Signal 2 received — shutting down
+2026-04-06 21:03:06  INFO     Shutting down...
+2026-04-06 21:03:06  INFO     ORB: Adapter cleanup
+2026-04-06 21:03:06  INFO     Disconnecting LiveMarketContext
+2026-04-06 21:03:06  WARNING  IBKR disconnected
+2026-04-06 21:03:06  INFO     V11 live trader stopped.

@@ -1,8 +1,8 @@
 # V11 Design Document — Darvas Box + Volume Imbalance + LLM Filter
 
-**Last updated:** 2026-04-07 ET (Phase 5: V6 ORB adapter built)  
-**Status:** Build Phase 5 complete. V6 ORB adapter integrated into MultiStrategyRunner (190 total tests). Next: Phase 7 (run_live.py entry point + paper trading).  
-**Related docs:** `docs/PROJECT_STATUS.md` | `docs/journal/2026-04-07_orb_adapter_session.md` | `docs/journal/2026-04-06_multi_strategy_session.md`
+**Last updated:** 2026-04-06 ET (Phase 8: critical fixes + trade execution test coverage)  
+**Status:** Phase 8 complete. Critical safety fixes (daily reset, risk gate, SL failsafe, position reconciliation). 263 total tests. Ready for paper trading on IBKR.  
+**Related docs:** `docs/PROJECT_STATUS.md` | `docs/journal/2026-04-06_phase7_run_live_session.md` | `docs/journal/2026-04-07_orb_adapter_session.md`
 
 ---
 

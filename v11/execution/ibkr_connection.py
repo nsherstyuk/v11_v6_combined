@@ -101,10 +101,28 @@ class IBKRConnection:
         self.log.info("Reconnecting...")
         ok = self.connect()
         if ok:
-            # Re-qualify all contracts and restart streams
-            for pair_name in list(self._contracts.keys()):
-                # Contracts need to be re-qualified after reconnection
-                pass  # Will be re-qualified on next use
+            # Re-qualify all contracts and restart streams after reconnection
+            for pair_name, contract in list(self._contracts.items()):
+                try:
+                    qualified = self.ib.qualifyContracts(contract)
+                    if qualified:
+                        self.log.info(f"Re-qualified {pair_name} after reconnect")
+                    else:
+                        self.log.error(f"Failed to re-qualify {pair_name}")
+                except Exception as e:
+                    self.log.error(f"Re-qualify {pair_name} failed: {e}")
+            for pair_name, ticker in list(self._tickers.items()):
+                try:
+                    contract = self._contracts.get(pair_name)
+                    if contract:
+                        new_ticker = self.ib.reqMktData(
+                            contract, '', snapshot=False,
+                            regulatorySnapshot=False)
+                        self.ib.sleep(2)
+                        self._tickers[pair_name] = new_ticker
+                        self.log.info(f"Restarted stream for {pair_name}")
+                except Exception as e:
+                    self.log.error(f"Restart stream {pair_name} failed: {e}")
         return ok
 
     def qualify_contract(self, inst: InstrumentConfig):
@@ -253,6 +271,16 @@ class IBKRConnection:
         except Exception as e:
             self.log.warning(f"Position query failed: {e}")
             return True  # assume position exists if can't check
+
+    def get_position_size(self, symbol: str, sec_type: str) -> float:
+        """Get actual position size at broker. Returns 0.0 if flat."""
+        try:
+            for p in self.ib.positions():
+                if p.contract.symbol == symbol and p.contract.secType == sec_type:
+                    return float(p.position)
+        except Exception as e:
+            self.log.warning(f"Position size query failed: {e}")
+        return 0.0
 
     def cancel_all_orders(self):
         open_orders = self.ib.openOrders()

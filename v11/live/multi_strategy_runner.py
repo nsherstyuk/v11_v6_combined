@@ -224,6 +224,9 @@ class MultiStrategyRunner:
         # Tag with strategy_name for identification
         engine.strategy_name = "Darvas_Breakout"
 
+        # Wire risk check callback
+        engine._risk_check = self._risk_manager.can_trade
+
         feed.add_strategy(engine)
         self._engines.append(engine)
 

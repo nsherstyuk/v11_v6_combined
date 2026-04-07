@@ -107,6 +107,9 @@ class InstrumentEngine:
         # Strategy identifier (set by MultiStrategyRunner)
         self.strategy_name: str = "Darvas_Breakout"
 
+        # Risk manager callback (set by MultiStrategyRunner)
+        self._risk_check = None
+
     @property
     def pair_name(self) -> str:
         return self.inst_config.pair_name
@@ -221,6 +224,21 @@ class InstrumentEngine:
                     f"current={self._last_price}")
                 return
 
+        # Guard: shared TradeManager may have been claimed by another strategy
+        if self._trade_manager.in_trade:
+            self._log.info(
+                f"{self.pair_name}[{self.strategy_name}]: "
+                f"TradeManager already in trade, skipping signal")
+            return
+
+        # Risk manager gate (portfolio-level check)
+        if self._risk_check is not None:
+            allowed, reason = self._risk_check(self.pair_name, self.strategy_name)
+            if not allowed:
+                self._log.warning(
+                    f"{self.pair_name}[{self.strategy_name}]: RISK REJECTED — {reason}")
+                return
+
         # Execute trade
         self._trade_manager.enter_trade(
             signal=signal,
@@ -325,6 +343,8 @@ class InstrumentEngine:
     def get_status(self) -> dict:
         """Get current engine status for diagnostics."""
         return {
+            'strategy_name': self.strategy_name,
+            'pair_name': self.pair_name,
             'instrument': self.pair_name,
             'bar_count': self._bar_count,
             'buffer_size': len(self._buffer),

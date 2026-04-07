@@ -1,17 +1,21 @@
 """
-V11 Live Trading Script — Main entry point.
+V11 Live Trading Script — Multi-Strategy Entry Point (Phase 7).
 
-Connects to IBKR, streams prices for all configured instruments,
-and runs the Darvas + LLM filter pipeline for each.
+Connects to IBKR, streams prices for configured instruments,
+and runs the MultiStrategyRunner with three strategies:
+    - EURUSD: Darvas Breakout + SMA(50)
+    - EURUSD: 4H Level Retest
+    - XAUUSD: V6 ORB (tick-driven)
 
 Usage:
     python -m v11.live.run_live --dry-run
     python -m v11.live.run_live --port 4002
+    python -m v11.live.run_live --instruments EURUSD XAUUSD
 """
 from __future__ import annotations
 
-import argparse
 import asyncio
+import argparse
 import logging
 import os
 import signal as signal_mod
@@ -19,6 +23,43 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# ── Python 3.14 compatibility ────────────────────────────────────────────────
+# Python 3.14 changed asyncio.wait_for to use asyncio.timeout() internally,
+# which requires being inside a running task. ib_insync calls wait_for from
+# a sync context via nest_asyncio, which doesn't set current_task properly.
+# Patch wait_for to avoid asyncio.timeout() when called outside a task.
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+if sys.version_info >= (3, 14):
+    _original_wait_for = asyncio.wait_for
+
+    async def _compat_wait_for(fut, timeout, **kwargs):
+        if timeout is None:
+            return await fut
+        fut = asyncio.ensure_future(fut)
+        loop = asyncio.get_event_loop()
+        timed_out = False
+
+        def _on_timeout():
+            nonlocal timed_out
+            timed_out = True
+            fut.cancel()
+
+        handle = loop.call_later(timeout, _on_timeout)
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            if timed_out:
+                raise asyncio.TimeoutError()
+            raise
+        finally:
+            handle.cancel()
+
+    asyncio.wait_for = _compat_wait_for
 
 try:
     import nest_asyncio
@@ -34,16 +75,19 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from v11.config.live_config import (
-    LiveConfig, XAUUSD_INSTRUMENT, EURUSD_INSTRUMENT, USDJPY_INSTRUMENT,
+    LiveConfig, XAUUSD_INSTRUMENT, EURUSD_INSTRUMENT,
+    InstrumentConfig,
 )
 from v11.config.strategy_config import (
-    XAUUSD_CONFIG, EURUSD_CONFIG, USDJPY_CONFIG, StrategyConfig,
+    EURUSD_CONFIG, StrategyConfig,
 )
-from v11.core.types import Bar, ExitReason
+from v11.core.types import Bar
 from v11.execution.ibkr_connection import IBKRConnection
-from v11.execution.trade_manager import TradeManager
-from v11.live.live_engine import InstrumentEngine
+from v11.live.multi_strategy_runner import MultiStrategyRunner
+from v11.live.risk_manager import RiskManager
 from v11.llm.grok_filter import GrokFilter
+from v11.llm.passthrough_filter import PassthroughFilter
+from v11.v6_orb.config import StrategyConfig as V6StrategyConfig
 
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -76,33 +120,55 @@ def setup_logging(log_dir: Path) -> logging.Logger:
     return log
 
 
-# ── Instrument/Config Mapping ────────────────────────────────────────────────
+# ── V6 ORB Config for XAUUSD ────────────────────────────────────────────────
+# Parameters from v6_orb_refactor/live/example_live_xauusd.py
 
-INSTRUMENT_MAP = {
-    "XAUUSD": (XAUUSD_INSTRUMENT, XAUUSD_CONFIG),
-    "EURUSD": (EURUSD_INSTRUMENT, EURUSD_CONFIG),
-    "USDJPY": (USDJPY_INSTRUMENT, USDJPY_CONFIG),
+XAUUSD_ORB_CONFIG = V6StrategyConfig(
+    instrument="XAUUSD",
+    range_start_hour=0,
+    range_end_hour=6,
+    trade_start_hour=8,
+    trade_end_hour=16,
+    skip_weekdays=(2,),          # skip Wednesday
+    rr_ratio=2.5,
+    min_range_size=1.0,
+    max_range_size=15.0,
+    velocity_filter_enabled=True,
+    velocity_lookback_minutes=3,
+    velocity_threshold=168.0,    # P50 from research
+    qty=1,
+    point_value=1.0,
+    price_decimals=2,
+)
+
+
+# ── Instrument/Strategy Mapping ─────────────────────────────────────────────
+
+# Which instruments are available and what strategies run on each
+INSTRUMENT_MAP: dict[str, InstrumentConfig] = {
+    "EURUSD": EURUSD_INSTRUMENT,
+    "XAUUSD": XAUUSD_INSTRUMENT,
 }
 
 
 # ── Main Trader ──────────────────────────────────────────────────────────────
 
 class V11LiveTrader:
-    """Multi-instrument live trader orchestrator."""
+    """Multi-strategy live trader using MultiStrategyRunner.
 
-    def __init__(self, live_cfg: LiveConfig, log: logging.Logger):
+    Wires three strategies across two instruments:
+        EURUSD: Darvas Breakout + 4H Level Retest (shared TradeManager)
+        XAUUSD: V6 ORB (own execution engine via adapter)
+    """
+
+    def __init__(self, live_cfg: LiveConfig, log: logging.Logger,
+                 use_llm: bool = True):
         self.live_cfg = live_cfg
         self.log = log
         self._shutdown = False
+        self._current_trading_date: str = ""  # for daily reset detection
 
-        # Load API key
-        load_dotenv(ROOT / ".env")
-        api_key = os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY", "")
-        if not api_key:
-            raise ValueError(
-                "No API key found. Set XAI_API_KEY or GROK_API_KEY in .env")
-
-        # IBKR connection (shared across instruments)
+        # IBKR connection (shared)
         self.conn = IBKRConnection(
             host=live_cfg.ibkr_host,
             port=live_cfg.ibkr_port,
@@ -110,56 +176,84 @@ class V11LiveTrader:
             log=log,
         )
 
-        # LLM filter (shared across instruments)
-        grok_log_dir = ROOT / live_cfg.grok_log_dir
-        self.llm_filter = GrokFilter(
-            api_key=api_key,
-            model=live_cfg.llm_model,
-            timeout=live_cfg.llm_timeout_seconds,
-            log_dir=str(grok_log_dir),
+        # LLM filter (shared)
+        if use_llm:
+            load_dotenv(ROOT / ".env")
+            api_key = os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY", "")
+            if not api_key:
+                raise ValueError(
+                    "No API key found. Set XAI_API_KEY or GROK_API_KEY in .env")
+            grok_log_dir = ROOT / live_cfg.grok_log_dir
+            self.llm_filter = GrokFilter(
+                api_key=api_key,
+                model=live_cfg.llm_model,
+                timeout=live_cfg.llm_timeout_seconds,
+                log_dir=str(grok_log_dir),
+            )
+            log.info("LLM filter: Grok (active)")
+        else:
+            self.llm_filter = PassthroughFilter(rr_ratio=2.0)
+            log.info("LLM filter: DISABLED (mechanical auto-approve)")
+
+        # Risk manager (portfolio-level, across all strategies)
+        self.risk_manager = RiskManager(
+            max_daily_loss=live_cfg.max_daily_loss,
+            max_daily_trades_per_strategy=live_cfg.max_daily_trades,
+            max_concurrent_positions=live_cfg.max_concurrent_positions,
+            log=log,
         )
 
-        # Per-instrument engines
-        self.engines: dict[str, InstrumentEngine] = {}
-        log_dir = ROOT / "v11" / "live" / "logs"
+        # Multi-strategy runner
         trade_log_dir = ROOT / "v11" / "live" / "trades"
+        self.runner = MultiStrategyRunner(
+            conn=self.conn,
+            llm_filter=self.llm_filter,
+            live_config=live_cfg,
+            risk_manager=self.risk_manager,
+            log=log,
+            trade_log_dir=str(trade_log_dir),
+        )
 
-        for inst_cfg in live_cfg.instruments:
-            pair = inst_cfg.pair_name
-            if pair not in INSTRUMENT_MAP:
-                log.warning(f"Unknown instrument {pair}, skipping")
-                continue
+        # Track which instruments are active
+        self._active_pairs: list[str] = []
 
-            _, strategy_cfg = INSTRUMENT_MAP[pair]
+    def _wire_strategies(self) -> None:
+        """Add strategies to the runner based on configured instruments."""
+        active_pairs = {i.pair_name for i in self.live_cfg.instruments}
 
-            trade_mgr = TradeManager(
-                conn=self.conn,
-                inst=inst_cfg,
-                log=log,
-                trade_log_dir=trade_log_dir,
-                dry_run=live_cfg.dry_run,
+        if "EURUSD" in active_pairs:
+            # Strategy A: Darvas Breakout + SMA(50)
+            self.runner.add_darvas_strategy(
+                strategy_config=EURUSD_CONFIG,
+                inst_config=EURUSD_INSTRUMENT,
             )
-
-            engine = InstrumentEngine(
-                strategy_config=strategy_cfg,
-                inst_config=inst_cfg,
-                llm_filter=self.llm_filter,
-                trade_manager=trade_mgr,
-                live_config=live_cfg,
-                log=log,
+            # Strategy B: 4H Level Retest
+            self.runner.add_level_retest_strategy(
+                strategy_config=EURUSD_CONFIG,
+                inst_config=EURUSD_INSTRUMENT,
             )
-            self.engines[pair] = engine
+            self._active_pairs.append("EURUSD")
 
-    def seed_buffers(self):
-        """Load historical bars for all instruments."""
-        for pair, engine in self.engines.items():
+        if "XAUUSD" in active_pairs:
+            # Strategy C: V6 ORB (tick-driven)
+            state_dir = str(ROOT / "v11" / "live" / "state")
+            self.runner.add_orb_strategy(
+                v6_config=XAUUSD_ORB_CONFIG,
+                inst_config=XAUUSD_INSTRUMENT,
+                state_dir=state_dir,
+            )
+            self._active_pairs.append("XAUUSD")
+
+    def _seed_historical(self) -> None:
+        """Load historical bars for all instruments with active feeds."""
+        for pair in self.runner.get_feed_pairs():
             self.log.info(f"Seeding {pair} buffer...")
             df = self.conn.fetch_historical_bars(
                 pair, duration="28800 S", bar_size="1 min")
             if df.empty:
                 self.log.warning(f"{pair}: No historical bars")
                 continue
-            count = 0
+            bars = []
             for _, row in df.iterrows():
                 ts = pd.Timestamp(row['date'])
                 if ts.tzinfo is None:
@@ -168,17 +262,15 @@ class V11LiveTrader:
                 bv = vol / 2 if vol > 0 else 0.0
                 sv = vol / 2 if vol > 0 else 0.0
                 tc = int(vol) if vol > 0 else 0
-                bar = Bar(
+                bars.append(Bar(
                     timestamp=ts.to_pydatetime(),
                     open=row['open'], high=row['high'],
                     low=row['low'], close=row['close'],
                     buy_volume=bv, sell_volume=sv, tick_count=tc,
-                )
-                engine.add_historical_bar(bar)
-                count += 1
-            self.log.info(f"{pair}: Seeded {count} bars")
+                ))
+            self.runner.seed_historical(pair, bars)
 
-    def run(self):
+    def run(self) -> None:
         """Main trading loop."""
         def on_signal(sig, frame):
             self.log.info(f"Signal {sig} received — shutting down")
@@ -190,50 +282,66 @@ class V11LiveTrader:
             self.log.error("Cannot connect to IBKR — exiting")
             return
 
-        # Qualify contracts and start streams
+        # Qualify contracts and start price streams
         for inst_cfg in self.live_cfg.instruments:
             self.conn.qualify_contract(inst_cfg)
             self.conn.start_price_stream(inst_cfg)
 
-        self.seed_buffers()
+        # Wire strategies (after contracts are qualified — ORB needs contract)
+        self._wire_strategies()
 
-        for pair, engine in self.engines.items():
+        # Seed historical data
+        self._seed_historical()
+
+        # Log readiness
+        status = self.runner.get_all_status()
+        for s in status['strategies']:
             self.log.info(
-                f"{pair}: Engine ready. Buffer: {engine.bar_count} bars. "
-                f"Dry-run: {self.live_cfg.dry_run}")
+                f"  {s.get('strategy_name', '?')}: "
+                f"bars={s.get('bar_count', 0)}")
+        self.log.info(
+            f"Runner ready: {len(status['strategies'])} strategies "
+            f"on {status['instruments']}")
 
         poll_interval = 1.0
-        last_status_log = 0
+        last_status_log = 0.0
         loop = asyncio.new_event_loop()
 
         while not self._shutdown:
             try:
+                was_connected = self.conn.connected
                 if not self.conn.ensure_connected():
                     self.log.error("Connection lost — waiting 10s")
                     time.sleep(10)
                     continue
+                if not was_connected and self.conn.connected:
+                    # Just reconnected — reconcile positions
+                    self._reconcile_positions()
 
                 now = datetime.now(timezone.utc)
 
-                for pair, engine in self.engines.items():
+                # Daily reset at date change (UTC)
+                today_str = now.strftime("%Y-%m-%d")
+                if self._current_trading_date and today_str != self._current_trading_date:
+                    self.log.info(
+                        f"Date changed {self._current_trading_date} → {today_str} — "
+                        f"resetting daily counters")
+                    self.runner.reset_daily()
+                self._current_trading_date = today_str
+
+                for pair in self._active_pairs:
                     price = self.conn.get_mid_price(pair)
                     if price is None:
                         continue
 
-                    completed_bar = engine.on_price(price, now)
+                    completed_bar = self.runner.on_price(pair, price, now)
                     if completed_bar is not None:
-                        loop.run_until_complete(engine.on_bar(completed_bar))
+                        loop.run_until_complete(
+                            self.runner.on_bar(pair, completed_bar))
 
-                # Periodic status log
+                # Periodic status log (every 5 minutes)
                 if time.time() - last_status_log > 300:
-                    for pair, engine in self.engines.items():
-                        status = engine.get_status()
-                        self.log.info(
-                            f"[STATUS] {pair}: bars={status['bar_count']} "
-                            f"state={status['detector_state']} "
-                            f"ATR={status['atr']:.4f} "
-                            f"trades={status['daily_trades']} "
-                            f"PnL=${status['daily_pnl']:+.2f}")
+                    self._log_status()
                     last_status_log = time.time()
 
                 self.conn.sleep(poll_interval)
@@ -251,42 +359,66 @@ class V11LiveTrader:
         loop.close()
         self.log.info("V11 live trader stopped.")
 
-    def _cleanup(self):
-        """Close all open positions on shutdown."""
-        for pair, engine in self.engines.items():
-            if engine.in_trade:
-                self.log.warning(f"{pair}: Open trade at shutdown — closing")
-                if not self.live_cfg.dry_run:
-                    engine._trade_manager.force_close(
-                        current_price=0.0,
-                        reason=ExitReason.SHUTDOWN,
-                        current_bar_index=engine.bar_count,
-                    )
+    def _log_status(self) -> None:
+        """Log status for all strategies and risk manager."""
+        status = self.runner.get_all_status()
+        risk = status['risk']
+        self.log.info(
+            f"[RISK] PnL=${risk['combined_pnl']:+.2f} "
+            f"trades={risk['combined_trades']} "
+            f"positions={len(risk['open_positions'])}"
+            f"/{self.live_cfg.max_concurrent_positions}")
+        for s in status['strategies']:
+            self.log.info(
+                f"[STATUS] {s.get('strategy_name', '?')} "
+                f"on {s.get('pair_name', '?')}: "
+                f"bars={s.get('bar_count', 0)} "
+                f"in_trade={s.get('in_trade', False)}")
+
+    def _reconcile_positions(self) -> None:
+        """Reconcile internal trade state with broker after reconnect."""
+        self.log.info("Reconciling positions after reconnect...")
+        for feed in self.runner.feeds.values():
+            feed.trade_manager.reconcile_position()
+
+    def _cleanup(self) -> None:
+        """Clean up on shutdown. ORB adapter handles its own cleanup."""
+        for engine in self.runner.engines:
+            if hasattr(engine, 'cleanup'):
+                engine.cleanup()
 
 
 # ── Entry Point ──────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="V11 Live Trader")
+    parser = argparse.ArgumentParser(description="V11 Multi-Strategy Live Trader")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Run without submitting orders")
+                        help="Run without submitting orders (default: True)")
+    parser.add_argument("--live", action="store_true",
+                        help="Submit real orders (overrides --dry-run)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4002)
     parser.add_argument("--client-id", type=int, default=11)
     parser.add_argument("--instruments", nargs="+",
-                        default=["XAUUSD", "EURUSD", "USDJPY"],
-                        help="Instruments to trade")
+                        default=["EURUSD", "XAUUSD"],
+                        help="Instruments to trade (default: EURUSD XAUUSD)")
+    parser.add_argument("--max-daily-loss", type=float, default=500.0,
+                        help="Combined daily loss limit in USD")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="Disable Grok LLM filter (mechanical signals only)")
     args = parser.parse_args()
+
+    # Dry-run by default unless --live is specified
+    dry_run = not args.live
 
     # Build instrument list
     instruments = []
     for name in args.instruments:
         name = name.upper()
         if name in INSTRUMENT_MAP:
-            inst_cfg, _ = INSTRUMENT_MAP[name]
-            instruments.append(inst_cfg)
+            instruments.append(INSTRUMENT_MAP[name])
         else:
-            print(f"Unknown instrument: {name}")
+            print(f"Unknown instrument: {name}. Available: {list(INSTRUMENT_MAP.keys())}")
             sys.exit(1)
 
     live_cfg = LiveConfig(
@@ -294,7 +426,8 @@ def main():
         ibkr_port=args.port,
         ibkr_client_id=args.client_id,
         instruments=instruments,
-        dry_run=args.dry_run,
+        dry_run=dry_run,
+        max_daily_loss=args.max_daily_loss,
     )
     live_cfg.validate()
 
@@ -302,14 +435,18 @@ def main():
     log = setup_logging(log_dir)
 
     log.info("=" * 60)
-    log.info("V11 — Darvas Box + Volume Imbalance + LLM Filter")
+    log.info("V11 — Multi-Strategy Portfolio")
     log.info(f"  Instruments: {[i.pair_name for i in instruments]}")
-    log.info(f"  Dry-run:     {live_cfg.dry_run}")
-    log.info(f"  LLM:         {live_cfg.llm_model}")
-    log.info(f"  Confidence:  >= {live_cfg.llm_confidence_threshold}")
+    log.info(f"  Strategies:  Darvas+SMA, 4H Retest (EURUSD) + ORB (XAUUSD)")
+    log.info(f"  Dry-run:     {dry_run}")
+    use_llm = not args.no_llm
+    log.info(f"  LLM:         {'grok (active)' if use_llm else 'DISABLED'}")
+    if use_llm:
+        log.info(f"  Confidence:  >= {live_cfg.llm_confidence_threshold}")
+    log.info(f"  Daily loss:  ${live_cfg.max_daily_loss:.0f}")
     log.info("=" * 60)
 
-    trader = V11LiveTrader(live_cfg, log)
+    trader = V11LiveTrader(live_cfg, log, use_llm=use_llm)
     trader.run()
 
 

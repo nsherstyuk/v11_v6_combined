@@ -36,6 +36,7 @@ class RetestState(str, Enum):
 
 class ExitReason(str, Enum):
     SL = "SL"
+    TARGET = "TARGET"
     TIME_STOP = "TIME_STOP"
     SAFETY_LIMIT = "SAFETY_LIMIT"
     SHUTDOWN = "SHUTDOWN"

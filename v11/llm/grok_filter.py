@@ -9,6 +9,7 @@ Interface: evaluate_signal(context) -> FilterDecision
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -113,6 +114,11 @@ class GrokFilter:
             error_msg = f"LLM response validation failed: {e}"
             logger.error(error_msg)
             logger.error(f"Raw response: {raw_response}")
+        except (TimeoutError, asyncio.TimeoutError) as e:
+            error_msg = (
+                f"LLM TIMEOUT after {self._timeout}s — "
+                f"signal rejected due to latency, not LLM judgment")
+            logger.warning(error_msg)
         except Exception as e:
             error_msg = f"LLM call failed: {e}"
             logger.error(error_msg)

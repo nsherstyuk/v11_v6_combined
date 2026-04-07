@@ -202,8 +202,9 @@ class ORBAdapter:
         """Diagnostic status snapshot."""
         s = self._strategy
         return {
-            "instrument": self._instrument,
             "strategy_name": self.STRATEGY_NAME,
+            "pair_name": self._instrument,
+            "instrument": self._instrument,
             "state": s.state.value,
             "range": (f"{s.range.low:.{self._v6_config.price_decimals}f}-"
                       f"{s.range.high:.{self._v6_config.price_decimals}f}"

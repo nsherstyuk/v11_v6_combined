@@ -402,6 +402,8 @@ class LevelRetestEngine:
         """Get current engine status for diagnostics."""
         active_levels = self._level_detector.get_active_levels()
         return {
+            'strategy_name': self.strategy_name,
+            'pair_name': self.pair_name,
             'instrument': self.pair_name,
             'strategy': STRATEGY_NAME,
             'bar_count': self._bar_count,
