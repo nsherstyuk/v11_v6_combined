@@ -383,11 +383,18 @@ class ORBAdapter:
                 f"reason={decision.reasoning[:100]}")
             return False
 
-        if decision.confidence < self._llm_confidence_threshold:
+        # Mechanical fallback (timeout) bypasses confidence check — intent is to approve
+        is_fallback = "llm_fallback" in (decision.risk_flags or [])
+        if not is_fallback and decision.confidence < self._llm_confidence_threshold:
             self._log.info(
                 f"ORB LLM confidence {decision.confidence} "
                 f"< threshold {self._llm_confidence_threshold}")
             return False
+
+        if is_fallback:
+            self._log.info(
+                f"ORB LLM timed out — proceeding mechanically (fallback)")
+            return True
 
         self._log.info(
             f"ORB LLM APPROVED: conf={decision.confidence} "

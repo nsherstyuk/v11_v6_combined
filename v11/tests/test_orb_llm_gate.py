@@ -155,6 +155,51 @@ class TestGrokFilterORBTimeout:
             assert "llm_fallback" in decision.risk_flags
             assert mock_client.chat.completions.create.call_count == 2
 
+    @pytest.mark.asyncio
+    async def test_api_timeout_error_triggers_retry(self):
+        """Sync OpenAI client throws APITimeoutError — should retry then fallback."""
+        from v11.llm.grok_filter import GrokFilter
+        from openai import APITimeoutError
+        import httpx
+
+        with patch("v11.llm.grok_filter.OpenAI") as mock_cls:
+            mock_client = MagicMock()
+            mock_client.chat.completions.create = MagicMock(
+                side_effect=APITimeoutError(request=httpx.Request("POST", "https://api.x.ai/v1")))
+            mock_cls.return_value = mock_client
+
+            filt = GrokFilter(api_key="test", timeout=1.0)
+            ctx = _make_orb_context()
+            decision = await filt.evaluate_orb_signal(ctx)
+
+            assert decision.approved is True
+            assert "llm_fallback" in decision.risk_flags
+            assert mock_client.chat.completions.create.call_count == 2
+
+
+class TestAdapterFallbackBypassesConfidence:
+    """Mechanical fallback (timeout) should approve regardless of confidence threshold."""
+
+    @pytest.mark.asyncio
+    async def test_fallback_bypasses_confidence_threshold(self):
+        fallback_filter = MagicMock()
+        fallback_filter.evaluate_orb_signal = AsyncMock(return_value=FilterDecision(
+            approved=True, confidence=0,
+            entry_price=0.0, stop_price=0.0, target_price=0.0,
+            reasoning="LLM unavailable -- mechanical fallback",
+            risk_flags=["llm_fallback"],
+        ))
+        adapter = _make_adapter(llm_filter=fallback_filter)
+        adapter._strategy.state = StrategyState.RANGE_READY
+        adapter._strategy.range = RangeInfo(
+            high=4665.0, low=4616.0, start_time=None, end_time=None)
+        adapter._range_calculated = True
+        adapter._daily_bars = []
+
+        result = await adapter._evaluate_orb_signal(
+            datetime(2025, 4, 7, 8, 0, tzinfo=timezone.utc))
+        assert result is True
+
 
 # ── 5-8. Adapter LLM gate ───────────────────────────────────────────────────
 

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError
 from pydantic import ValidationError
 
 from .base import LLMFilter
@@ -42,7 +42,7 @@ class GrokFilter:
         self,
         api_key: str,
         model: str = "grok-4-1-fast-reasoning",
-        timeout: float = 10.0,
+        timeout: float = 30.0,
         log_dir: Optional[str] = None,
     ):
         self._client = OpenAI(
@@ -117,7 +117,7 @@ class GrokFilter:
             error_msg = f"LLM response validation failed: {e}"
             logger.error(error_msg)
             logger.error(f"Raw response: {raw_response}")
-        except (TimeoutError, asyncio.TimeoutError) as e:
+        except (TimeoutError, asyncio.TimeoutError, APITimeoutError) as e:
             error_msg = (
                 f"LLM TIMEOUT after {self._timeout}s — "
                 f"signal rejected due to latency, not LLM judgment")
@@ -261,7 +261,7 @@ class GrokFilter:
                 )
                 return decision
 
-            except (TimeoutError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.TimeoutError, APITimeoutError):
                 latency = time.monotonic() - start_time
                 if attempt == 0:
                     logger.warning(
