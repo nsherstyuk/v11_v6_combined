@@ -62,6 +62,8 @@ class ORBAdapter:
         state_dir: str = "",
         dry_run: bool = True,
         poll_interval: float = 2.0,
+        llm_filter=None,
+        llm_confidence_threshold: int = 75,
     ):
         """
         Args:
@@ -73,6 +75,8 @@ class ORBAdapter:
             state_dir: Directory for V6 gap history persistence. Empty = no persistence.
             dry_run: If True, V6 execution engine suppresses real orders.
             poll_interval: Seconds between strategy.on_tick() calls (V6 default: 2).
+            llm_filter: Optional LLM filter for ORB gate. None = skip gate.
+            llm_confidence_threshold: Minimum confidence to approve (default 75).
         """
         self._ib = ib
         self._contract = contract
@@ -104,6 +108,14 @@ class ORBAdapter:
             dry_run=dry_run,
             logger=log,
         )
+
+        # ── LLM gate (optional) ───────────────────────────────────
+        self._llm_filter = llm_filter
+        self._llm_confidence_threshold = llm_confidence_threshold
+        self._daily_bars: list = []
+        self._llm_evaluated_today: bool = False
+        self._llm_gate_pending: bool = False
+        self._llm_gate_time: Optional[datetime] = None
 
         # ── Adapter state ─────────────────────────────────────────
         self._last_poll_time: Optional[datetime] = None
@@ -186,13 +198,54 @@ class ORBAdapter:
             allowed, reason = self._risk_manager.can_trade(
                 self._instrument, self.STRATEGY_NAME)
             if not allowed:
-                self._log.debug(f"ORB risk gate: {reason}")
+                self._log.info(f"ORB risk gate BLOCKED: {reason}")
                 return
 
+            # ── LLM gate (once per day, deferred to on_bar for async) ─
+            if not self._llm_evaluated_today and not self._llm_gate_pending:
+                self._llm_gate_pending = True
+                self._llm_gate_time = now
+                self._log.info("ORB: LLM gate pending (will evaluate on next bar)")
+                return  # Hold at RANGE_READY until on_bar evaluates
+            if self._llm_gate_pending:
+                return  # Still waiting for on_bar to evaluate
+
         # ── Drive strategy ────────────────────────────────────────
+        # Log state transitions for diagnostics
+        state_before = self._strategy.state
         tick = self._get_current_tick(now)
-        if tick:
-            self._strategy.on_tick(tick, self._context, self._execution)
+        if tick is None:
+            # Log tick failure periodically (every 60s to avoid spam)
+            if (not hasattr(self, '_last_tick_warn') or
+                    (now - self._last_tick_warn).total_seconds() > 60):
+                self._log.warning(
+                    f"ORB: No tick available (bid={self._context._last_bid}, "
+                    f"ask={self._context._last_ask})")
+                self._last_tick_warn = now
+            return
+
+        self._strategy.on_tick(tick, self._context, self._execution)
+
+        state_after = self._strategy.state
+        if state_after != state_before:
+            self._log.info(
+                f"ORB state: {state_before.value} -> {state_after.value}")
+
+    async def on_bar(self, bar) -> None:
+        """Evaluate LLM gate when pending (requires async context for Grok API)."""
+        if not self._llm_gate_pending:
+            return
+
+        self._llm_gate_pending = False
+        self._llm_evaluated_today = True
+        now = self._llm_gate_time or bar.timestamp
+
+        approved = await self._evaluate_orb_signal(now)
+        if not approved:
+            self._strategy.state = StrategyState.DONE_TODAY
+            self._log.info("ORB state: RANGE_READY -> DONE_TODAY (LLM rejected)")
+        else:
+            self._log.info("ORB: LLM gate passed — brackets eligible")
 
     def add_historical_bar(self, bar) -> None:
         """No-op. V6 doesn't use historical bars for warmup."""
@@ -254,6 +307,93 @@ class ORBAdapter:
             return s.entry_price - exit_price
         return 0.0
 
+    # ── LLM gate ──────────────────────────────────────────────────
+
+    async def _evaluate_orb_signal(self, now: datetime) -> bool:
+        """Evaluate ORB setup via LLM. Returns True if approved or no LLM.
+
+        Called once per day when state first reaches RANGE_READY.
+        """
+        if self._llm_filter is None:
+            return True
+
+        if not hasattr(self._llm_filter, 'evaluate_orb_signal'):
+            return True
+
+        rng = self._strategy.range
+        if rng is None:
+            return True
+
+        from ..llm.models import ORBSignalContext, DailyBarData
+
+        mid = (rng.high + rng.low) / 2
+        size = rng.high - rng.low
+        size_pct = (size / mid * 100) if mid > 0 else 0.0
+
+        # Compute range_vs_avg from daily bars
+        if self._daily_bars:
+            daily_ranges = [b.h - b.l for b in self._daily_bars if hasattr(b, 'h')]
+            avg_range = sum(daily_ranges) / len(daily_ranges) if daily_ranges else size
+            range_vs_avg = size / avg_range if avg_range > 0 else 1.0
+        else:
+            range_vs_avg = 1.0
+
+        # Current price from context
+        price = self._context.get_current_price(now)
+        if price is None:
+            price = mid
+
+        # Session label
+        hour = now.hour
+        if 0 <= hour < 8:
+            session = "ASIAN_CLOSE"
+        elif 8 <= hour < 13:
+            session = "LONDON"
+        elif 13 <= hour < 17:
+            session = "LONDON_NY_OVERLAP"
+        else:
+            session = "NY"
+
+        context = ORBSignalContext(
+            instrument=self._instrument,
+            range_high=rng.high,
+            range_low=rng.low,
+            range_size=round(size, 2),
+            range_size_pct=round(size_pct, 3),
+            range_vs_avg=round(range_vs_avg, 2),
+            current_price=price,
+            distance_from_high=round(price - rng.high, 2),
+            distance_from_low=round(price - rng.low, 2),
+            session=session,
+            day_of_week=now.strftime("%A"),
+            current_time_utc=now.isoformat(),
+            recent_bars=[],
+            daily_bars=list(self._daily_bars),
+        )
+
+        self._log.info(
+            f"ORB LLM gate: evaluating range {rng.low:.2f}-{rng.high:.2f} "
+            f"(size={size:.2f}, vs_avg={range_vs_avg:.1f}x)")
+
+        decision = await self._llm_filter.evaluate_orb_signal(context)
+
+        if not decision.approved:
+            self._log.info(
+                f"ORB LLM REJECTED: conf={decision.confidence} "
+                f"reason={decision.reasoning[:100]}")
+            return False
+
+        if decision.confidence < self._llm_confidence_threshold:
+            self._log.info(
+                f"ORB LLM confidence {decision.confidence} "
+                f"< threshold {self._llm_confidence_threshold}")
+            return False
+
+        self._log.info(
+            f"ORB LLM APPROVED: conf={decision.confidence} "
+            f"reason={decision.reasoning[:100]}")
+        return True
+
     # ── Daily orchestration ───────────────────────────────────────
 
     def _reset_daily(self, today_str: str, now: datetime):
@@ -262,6 +402,8 @@ class ORBAdapter:
         self._current_date = today_str
         self._range_calculated = False
         self._gap_calculated = False
+        self._llm_evaluated_today = False
+        self._llm_gate_pending = False
 
         # Cancel lingering orders from previous day
         if self._strategy.state in (
