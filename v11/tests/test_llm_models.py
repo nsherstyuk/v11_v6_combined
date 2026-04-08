@@ -79,15 +79,16 @@ class TestLLMResponseConfidenceValidation:
 
 
 class TestLLMResponseStopValidation:
-    """Intent: Stop price must be > 0."""
+    """Intent: Stop price must be >= 0 (0 allowed for ORB signals)."""
 
-    def test_stop_zero_rejected(self):
+    def test_stop_zero_allowed(self):
+        """ORB signals return stop=0 because brackets are managed by V6."""
         raw = '{"approved": true, "confidence": 80, "entry": 100.0, "stop": 0, "target": 110.0, "reasoning": "test"}'
-        with pytest.raises(ValidationError):
-            LLMResponse.model_validate_json(raw)
+        resp = LLMResponse.model_validate_json(raw)
+        assert resp.stop == 0.0
 
     def test_stop_negative_rejected(self):
-        raw = '{"approved": true, "confidence": 80, "entry": 100.0, "stop": -5.0, "target": 110.0, "reasoning": "test"}'
+        raw = '{"approved": true, "confidence": 80, "entry": 100.0, "stop": -1.0, "target": 110.0, "reasoning": "test"}'
         with pytest.raises(ValidationError):
             LLMResponse.model_validate_json(raw)
 
@@ -153,3 +154,59 @@ class TestFilterDecisionImmutability:
         )
         with pytest.raises(AttributeError):
             fd.confidence = 0
+
+
+class TestORBPromptTemplate:
+    def test_prompt_contains_context(self):
+        from v11.llm.prompt_templates import ORB_SYSTEM_PROMPT, build_orb_signal_prompt
+        prompt = build_orb_signal_prompt('{"range_high": 4665.0}')
+        assert "4665.0" in prompt
+        assert len(ORB_SYSTEM_PROMPT) > 100
+
+
+class TestDailyBarData:
+    def test_create_daily_bar(self):
+        from v11.llm.models import DailyBarData
+        bar = DailyBarData(date="2025-04-07", o=4600.0, h=4665.0, l=4590.0, c=4620.0)
+        assert bar.date == "2025-04-07"
+        assert bar.h == 4665.0
+
+
+class TestORBSignalContext:
+    def test_create_context(self):
+        from v11.llm.models import ORBSignalContext, DailyBarData, BarData
+        ctx = ORBSignalContext(
+            instrument="XAUUSD",
+            range_high=4665.0,
+            range_low=4616.0,
+            range_size=49.0,
+            range_size_pct=1.05,
+            range_vs_avg=3.2,
+            current_price=4640.0,
+            distance_from_high=25.0,
+            distance_from_low=24.0,
+            session="LONDON",
+            day_of_week="Monday",
+            current_time_utc="2025-04-07T08:00:00Z",
+            recent_bars=[],
+            daily_bars=[],
+        )
+        assert ctx.instrument == "XAUUSD"
+        assert ctx.range_size_pct == 1.05
+
+    def test_serialization_roundtrip(self):
+        from v11.llm.models import ORBSignalContext
+        ctx = ORBSignalContext(
+            instrument="XAUUSD",
+            range_high=4665.0, range_low=4616.0,
+            range_size=49.0, range_size_pct=1.05, range_vs_avg=3.2,
+            current_price=4640.0,
+            distance_from_high=25.0, distance_from_low=24.0,
+            session="LONDON", day_of_week="Monday",
+            current_time_utc="2025-04-07T08:00:00Z",
+            recent_bars=[], daily_bars=[],
+        )
+        json_str = ctx.model_dump_json()
+        restored = ORBSignalContext.model_validate_json(json_str)
+        assert restored.range_high == 4665.0
+        assert restored.range_vs_avg == 3.2

@@ -83,7 +83,47 @@ class LLMResponse(BaseModel):
 
     @field_validator("stop")
     @classmethod
-    def stop_must_be_positive(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError(f"stop must be > 0, got {v}")
+    def stop_must_be_non_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"stop must be >= 0, got {v}")
         return v
+
+
+class DailyBarData(BaseModel):
+    """Compact daily bar for ORB LLM context."""
+    date: str       # YYYY-MM-DD
+    o: float        # open
+    h: float        # high
+    l: float        # low
+    c: float        # close
+
+
+class ORBSignalContext(BaseModel):
+    """Everything the LLM receives when ORB is in RANGE_READY.
+
+    This is the complete input for the ORB LLM gate.
+    Grok decides whether to place brackets based on this context.
+    """
+    signal_type: str = "ORB_RANGE_READY"
+    instrument: str
+
+    # Range stats
+    range_high: float
+    range_low: float
+    range_size: float               # absolute (e.g. $48.16)
+    range_size_pct: float           # as % of midpoint (e.g. 1.05)
+    range_vs_avg: float             # ratio vs 10-day average range
+
+    # Current price
+    current_price: float
+    distance_from_high: float       # current_price - range_high (negative if below)
+    distance_from_low: float        # current_price - range_low (negative if below)
+
+    # Timing
+    session: str                    # ASIAN_CLOSE, LONDON, LONDON_NY_OVERLAP, NY
+    day_of_week: str                # Monday, Tuesday, etc.
+    current_time_utc: str           # ISO format
+
+    # Bar context
+    recent_bars: List[BarData]      # last 360 1-min bars (6 hours)
+    daily_bars: List[DailyBarData]  # last 10 daily bars
