@@ -249,7 +249,7 @@ class V11LiveTrader:
         for pair in self.runner.get_feed_pairs():
             self.log.info(f"Seeding {pair} buffer...")
             df = self.conn.fetch_historical_bars(
-                pair, duration="28800 S", bar_size="1 min")
+                pair, duration="3 D", bar_size="1 min")
             if df.empty:
                 self.log.warning(f"{pair}: No historical bars")
                 continue
