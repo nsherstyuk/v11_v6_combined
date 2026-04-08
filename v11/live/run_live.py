@@ -270,6 +270,27 @@ class V11LiveTrader:
                 ))
             self.runner.seed_historical(pair, bars)
 
+        # Fetch daily bars for ORB LLM context
+        for pair in self.runner.get_feed_pairs():
+            if pair == "XAUUSD":
+                self.log.info(f"Fetching daily bars for {pair} (ORB context)...")
+                df = self.conn.fetch_historical_bars(
+                    pair, duration="15 D", bar_size="1 day")
+                if not df.empty:
+                    from v11.llm.models import DailyBarData
+                    daily_bars = []
+                    for _, row in df.iterrows():
+                        daily_bars.append(DailyBarData(
+                            date=str(row['date'])[:10],
+                            o=row['open'], h=row['high'],
+                            l=row['low'], c=row['close'],
+                        ))
+                    for engine in self.runner.engines:
+                        if hasattr(engine, '_daily_bars') and engine.pair_name == pair:
+                            engine._daily_bars = daily_bars
+                            self.log.info(
+                                f"{pair}: Loaded {len(daily_bars)} daily bars for ORB LLM")
+
     def run(self) -> None:
         """Main trading loop."""
         def on_signal(sig, frame):
@@ -324,7 +345,7 @@ class V11LiveTrader:
                 today_str = now.strftime("%Y-%m-%d")
                 if self._current_trading_date and today_str != self._current_trading_date:
                     self.log.info(
-                        f"Date changed {self._current_trading_date} → {today_str} — "
+                        f"Date changed {self._current_trading_date} -> {today_str} -- "
                         f"resetting daily counters")
                     self.runner.reset_daily()
                 self._current_trading_date = today_str
@@ -369,11 +390,33 @@ class V11LiveTrader:
             f"positions={len(risk['open_positions'])}"
             f"/{self.live_cfg.max_concurrent_positions}")
         for s in status['strategies']:
+            extra = ""
+            name = s.get('strategy_name', '?')
+            if name == 'V6_ORB':
+                extra = (f" state={s.get('state', '?')}"
+                         f" range={s.get('range', 'none')}"
+                         f" range_calc={s.get('range_calculated', '?')}")
+            elif name == 'Darvas_Breakout':
+                box = s.get('active_box')
+                box_str = (f"[{box.bottom:.5f}-{box.top:.5f}]"
+                           if box else "none")
+                extra = (f" det={s.get('detector_state', '?')}"
+                         f" box={box_str}"
+                         f" atr={s.get('atr', 0):.5f}"
+                         f" sma={s.get('htf_sma', 'n/a')}"
+                         f" sma_bars={s.get('htf_sma_bars', 0)}")
+            elif name == '4H_Level_Retest':
+                extra = (f" levels={s.get('active_levels', 0)}"
+                         f" pending={s.get('pending_retests', 0)}"
+                         f" atr={s.get('atr', 0):.5f}"
+                         f" sma={s.get('htf_sma', 'n/a')}"
+                         f" sma_bars={s.get('htf_sma_bars', 0)}"
+                         f" lvl_htf={s.get('level_htf_bars', 0)}")
             self.log.info(
-                f"[STATUS] {s.get('strategy_name', '?')} "
+                f"[STATUS] {name} "
                 f"on {s.get('pair_name', '?')}: "
                 f"bars={s.get('bar_count', 0)} "
-                f"in_trade={s.get('in_trade', False)}")
+                f"in_trade={s.get('in_trade', False)}{extra}")
 
     def _reconcile_positions(self) -> None:
         """Reconcile internal trade state with broker after reconnect."""

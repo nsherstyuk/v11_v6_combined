@@ -170,12 +170,27 @@ class LevelRetestEngine:
 
         # Get active levels and check for retest signals
         active_levels = self._level_detector.get_active_levels()
+
+        # Log level activity periodically (every 60 bars = ~1 hour)
+        if self._bar_count % 60 == 0:
+            pending = self._retest_detector.pending_count
+            self._log.debug(
+                f"{self.pair_name}[{STRATEGY_NAME}]: "
+                f"levels={len(active_levels)} pending_retests={pending} "
+                f"atr={self._atr:.5f} "
+                f"htf_bars={self._level_detector.htf_bars_count} "
+                f"close={bar.close}")
+
         if not active_levels:
             return
 
         signals = self._retest_detector.add_bar(bar, active_levels, self._atr)
 
         for signal in signals:
+            self._log.info(
+                f"{self.pair_name}[{STRATEGY_NAME}]: RETEST SIGNAL — "
+                f"{signal.direction.value} @ {signal.breakout_price} "
+                f"level={signal.level_price:.5f} atr={self._atr:.5f}")
             await self._handle_retest_signal(signal, bar)
             # Only process the first signal per bar (first signal wins)
             break

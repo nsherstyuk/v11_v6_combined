@@ -156,9 +156,28 @@ class InstrumentEngine:
             return  # Don't look for new signals while in a trade
 
         # Feed bar to Darvas detector
+        state_before = self._detector.state
         signal = self._detector.add_bar(bar)
+        state_after = self._detector.state
+
+        # Log detector state transitions (DEBUG — file only)
+        if state_after != state_before:
+            self._log.debug(
+                f"{self.pair_name}[Darvas]: {state_before} -> {state_after} "
+                f"bar#{self._bar_count} close={bar.close}")
+        if self._detector.active_box and self._bar_count % 60 == 0:
+            box = self._detector.active_box
+            self._log.debug(
+                f"{self.pair_name}[Darvas]: Active box "
+                f"[{box.bottom:.5f}-{box.top:.5f}] "
+                f"duration={box.duration_bars} bars")
 
         if signal is not None:
+            self._log.info(
+                f"{self.pair_name}: DARVAS SIGNAL — "
+                f"{signal.direction.value} breakout @ {signal.breakout_price} "
+                f"box=[{signal.box.bottom:.5f}-{signal.box.top:.5f}] "
+                f"atr={signal.atr:.5f}")
             await self._handle_signal(signal, bar)
 
     async def _handle_signal(self, signal: BreakoutSignal, bar: Bar) -> None:
