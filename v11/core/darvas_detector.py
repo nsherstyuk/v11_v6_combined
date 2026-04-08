@@ -105,6 +105,36 @@ class DarvasDetector:
         """Current state machine state (for diagnostics)."""
         return self._state
 
+    @property
+    def formation_progress(self) -> dict:
+        """Diagnostic snapshot of box formation progress.
+
+        Read-only edge access to internal state for logging.
+        Never use this for trading decisions — use add_bar() signals only.
+        """
+        info = {"state": self._state}
+        if self._state == self.CONFIRMING_TOP:
+            info["candidate_top"] = self._candidate_top
+            info["bars_confirmed"] = self._bars_since_new_high
+            info["bars_needed"] = self._config.top_confirm_bars
+        elif self._state == self.CONFIRMING_BOTTOM:
+            info["confirmed_top"] = self._confirmed_top
+            info["candidate_bottom"] = self._candidate_bottom
+            info["bars_confirmed"] = self._bars_since_new_low
+            info["bars_needed"] = self._config.bottom_confirm_bars
+        elif self._state == self.BOX_ACTIVE:
+            if self._active_box:
+                info["box_top"] = self._active_box.top
+                info["box_bottom"] = self._active_box.bottom
+        elif self._state == self.CONFIRMING_BREAKOUT:
+            info["direction"] = self._breakout_direction.value if self._breakout_direction else "?"
+            info["confirm_count"] = self._breakout_confirm_count
+            info["confirm_needed"] = self._config.breakout_confirm_bars
+            if self._active_box:
+                info["box_top"] = self._active_box.top
+                info["box_bottom"] = self._active_box.bottom
+        return info
+
     def add_bar(self, bar: Bar) -> Optional[BreakoutSignal]:
         """Process a new bar. Returns a BreakoutSignal if a confirmed breakout is detected.
 

@@ -289,6 +289,16 @@ class IncrementalSwingLevelDetector:
         """Number of completed HTF bars processed."""
         return self._total_htf_bars
 
+    @property
+    def buffer_fill(self) -> str:
+        """Diagnostic: current swing detector buffer fill (e.g. '18/21')."""
+        return f"{self._detector.buffer_size}/{self._detector.required_buffer_size}"
+
+    @property
+    def levels_ready(self) -> bool:
+        """Whether enough HTF bars exist for the swing detector to produce levels."""
+        return self._detector.buffer_size >= self._detector.required_buffer_size
+
     def add_bar(self, bar: Bar) -> List[SwingLevel]:
         """Process a 1-min bar. Returns newly detected levels (if any).
 

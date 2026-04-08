@@ -398,20 +398,46 @@ class V11LiveTrader:
                          f" range_calc={s.get('range_calculated', '?')}")
             elif name == 'Darvas_Breakout':
                 box = s.get('active_box')
-                box_str = (f"[{box.bottom:.5f}-{box.top:.5f}]"
-                           if box else "none")
-                extra = (f" det={s.get('detector_state', '?')}"
+                det_state = s.get('detector_state', '?')
+                prog = s.get('formation_progress', {})
+                if box:
+                    box_str = f"[{box.bottom:.5f}-{box.top:.5f}]"
+                elif det_state == 'CONFIRMING_TOP':
+                    box_str = (f"forming top={prog.get('candidate_top', 0):.5f} "
+                               f"{prog.get('bars_confirmed', 0)}/{prog.get('bars_needed', 0)}")
+                elif det_state == 'CONFIRMING_BOTTOM':
+                    box_str = (f"top={prog.get('confirmed_top', 0):.5f} "
+                               f"bot={prog.get('candidate_bottom', 0):.5f} "
+                               f"{prog.get('bars_confirmed', 0)}/{prog.get('bars_needed', 0)}")
+                elif det_state == 'CONFIRMING_BREAKOUT':
+                    box_str = (f"BREAKOUT {prog.get('direction', '?')} "
+                               f"{prog.get('confirm_count', 0)}/{prog.get('confirm_needed', 0)}")
+                else:
+                    box_str = "seeking"
+                sma = s.get('htf_sma')
+                sma_str = f"{sma:.5f}" if sma else "warming"
+                extra = (f" det={det_state}"
                          f" box={box_str}"
                          f" atr={s.get('atr', 0):.5f}"
-                         f" sma={s.get('htf_sma', 'n/a')}"
-                         f" sma_bars={s.get('htf_sma_bars', 0)}")
+                         f" sma={sma_str}({s.get('htf_sma_bars', 0)})")
             elif name == '4H_Level_Retest':
+                sma = s.get('htf_sma')
+                sma_str = f"{sma:.5f}" if sma else "warming"
+                nearest = s.get('nearest_level')
+                if nearest:
+                    nd = s.get('nearest_dist', 0)
+                    atr = s.get('atr', 0)
+                    nd_atr = f"{nd/atr:.1f}ATR" if atr > 0 else "?"
+                    near_str = f" near={nearest.level_type.value}@{nearest.price:.5f}({nd_atr})"
+                else:
+                    near_str = ""
+                buf = s.get('buffer_fill', '?')
                 extra = (f" levels={s.get('active_levels', 0)}"
                          f" pending={s.get('pending_retests', 0)}"
+                         f"{near_str}"
                          f" atr={s.get('atr', 0):.5f}"
-                         f" sma={s.get('htf_sma', 'n/a')}"
-                         f" sma_bars={s.get('htf_sma_bars', 0)}"
-                         f" lvl_htf={s.get('level_htf_bars', 0)}")
+                         f" sma={sma_str}({s.get('htf_sma_bars', 0)})"
+                         f" htf={s.get('level_htf_bars', 0)}({buf})")
             self.log.info(
                 f"[STATUS] {name} "
                 f"on {s.get('pair_name', '?')}: "

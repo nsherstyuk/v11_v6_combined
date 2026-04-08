@@ -162,15 +162,43 @@ class InstrumentEngine:
 
         # Log detector state transitions (DEBUG — file only)
         if state_after != state_before:
+            prog = self._detector.formation_progress
             self._log.debug(
                 f"{self.pair_name}[Darvas]: {state_before} -> {state_after} "
-                f"bar#{self._bar_count} close={bar.close}")
-        if self._detector.active_box and self._bar_count % 60 == 0:
-            box = self._detector.active_box
-            self._log.debug(
-                f"{self.pair_name}[Darvas]: Active box "
-                f"[{box.bottom:.5f}-{box.top:.5f}] "
-                f"duration={box.duration_bars} bars")
+                f"bar#{self._bar_count} close={bar.close} {prog}")
+
+        # Log formation progress every 60 bars (~1 hour)
+        if self._bar_count % 60 == 0:
+            prog = self._detector.formation_progress
+            state = prog["state"]
+            if state == "CONFIRMING_TOP":
+                self._log.debug(
+                    f"{self.pair_name}[Darvas]: Forming top — "
+                    f"candidate={prog['candidate_top']:.5f} "
+                    f"confirm={prog['bars_confirmed']}/{prog['bars_needed']} bars "
+                    f"close={bar.close}")
+            elif state == "CONFIRMING_BOTTOM":
+                self._log.debug(
+                    f"{self.pair_name}[Darvas]: Forming bottom — "
+                    f"top={prog['confirmed_top']:.5f} "
+                    f"candidate_bot={prog['candidate_bottom']:.5f} "
+                    f"confirm={prog['bars_confirmed']}/{prog['bars_needed']} bars "
+                    f"close={bar.close}")
+            elif state == "BOX_ACTIVE":
+                dist_top = bar.close - prog.get("box_top", 0)
+                dist_bot = bar.close - prog.get("box_bottom", 0)
+                atr = self._detector.current_atr
+                self._log.debug(
+                    f"{self.pair_name}[Darvas]: BOX ACTIVE "
+                    f"[{prog.get('box_bottom', 0):.5f}-{prog.get('box_top', 0):.5f}] "
+                    f"close={bar.close} dist_top={dist_top:+.5f} dist_bot={dist_bot:+.5f} "
+                    f"({dist_top/atr:+.1f}ATR/{dist_bot/atr:+.1f}ATR)" if atr > 0 else "")
+            elif state == "CONFIRMING_BREAKOUT":
+                self._log.debug(
+                    f"{self.pair_name}[Darvas]: BREAKOUT CONFIRMING — "
+                    f"{prog.get('direction', '?')} "
+                    f"confirm={prog.get('confirm_count', 0)}/{prog.get('confirm_needed', 0)} bars "
+                    f"close={bar.close}")
 
         if signal is not None:
             self._log.info(
@@ -377,6 +405,7 @@ class InstrumentEngine:
             'buffer_size': len(self._buffer),
             'detector_state': self._detector.state,
             'active_box': self._detector.active_box,
+            'formation_progress': self._detector.formation_progress,
             'atr': self._detector.current_atr,
             'in_trade': self._trade_manager.in_trade,
             'daily_trades': self._trade_manager.daily_trades,

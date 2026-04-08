@@ -80,6 +80,25 @@ class RetestDetector:
         """Number of levels currently being tracked (BROKEN or RETESTING)."""
         return len(self._pending)
 
+    def get_pending_details(self) -> List[dict]:
+        """Diagnostic snapshot of all pending retests.
+
+        Read-only edge access for logging. Never use for trading decisions.
+        """
+        details = []
+        for key, p in self._pending.items():
+            elapsed = self._bar_index - p.break_bar_index
+            details.append({
+                "level_price": p.level.price,
+                "level_type": p.level.level_type.value,
+                "direction": p.direction.value,
+                "state": p.state.value,
+                "elapsed_bars": elapsed,
+                "max_bars": self._max_pb,
+                "pulled_back": p.pulled_back,
+            })
+        return details
+
     def add_bar(self, bar: Bar, active_levels: List[SwingLevel],
                 atr: float) -> List[RetestSignal]:
         """Process a 1-min bar against active levels. Returns retest signals.

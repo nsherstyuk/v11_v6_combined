@@ -173,13 +173,28 @@ class LevelRetestEngine:
 
         # Log level activity periodically (every 60 bars = ~1 hour)
         if self._bar_count % 60 == 0:
-            pending = self._retest_detector.pending_count
+            det = self._level_detector
             self._log.debug(
                 f"{self.pair_name}[{STRATEGY_NAME}]: "
-                f"levels={len(active_levels)} pending_retests={pending} "
-                f"atr={self._atr:.5f} "
-                f"htf_bars={self._level_detector.htf_bars_count} "
-                f"close={bar.close}")
+                f"levels={len(active_levels)} htf_bars={det.htf_bars_count} "
+                f"buf_fill={det.buffer_fill} atr={self._atr:.5f} close={bar.close}")
+
+            # Log each active level with distance from current price
+            for lv in active_levels:
+                dist = bar.close - lv.price
+                dist_atr = dist / self._atr if self._atr > 0 else 0
+                self._log.debug(
+                    f"  {lv.level_type.value} @ {lv.price:.5f} "
+                    f"dist={dist:+.5f} ({dist_atr:+.1f}ATR) "
+                    f"age={lv.origin_time.strftime('%m-%d %H:%M')}")
+
+            # Log pending retests with progress
+            for p in self._retest_detector.get_pending_details():
+                self._log.debug(
+                    f"  PENDING {p['direction']} retest @ {p['level_price']:.5f} "
+                    f"({p['level_type']}) state={p['state']} "
+                    f"elapsed={p['elapsed_bars']}/{p['max_bars']} "
+                    f"pullback={'yes' if p['pulled_back'] else 'no'}")
 
         if not active_levels:
             return
@@ -416,6 +431,18 @@ class LevelRetestEngine:
     def get_status(self) -> dict:
         """Get current engine status for diagnostics."""
         active_levels = self._level_detector.get_active_levels()
+
+        # Find nearest level and distance
+        nearest_dist = None
+        nearest_level = None
+        last_close = self._buffer.get_bars(1)[-1].close if self._buffer.get_bars(1) else 0
+        if active_levels and last_close > 0:
+            for lv in active_levels:
+                d = abs(last_close - lv.price)
+                if nearest_dist is None or d < nearest_dist:
+                    nearest_dist = d
+                    nearest_level = lv
+
         return {
             'strategy_name': self.strategy_name,
             'pair_name': self.pair_name,
@@ -429,4 +456,8 @@ class LevelRetestEngine:
             'htf_sma': self._sma_filter.current_sma if self._sma_filter else None,
             'htf_sma_bars': self._sma_filter.htf_bars_count if self._sma_filter else 0,
             'level_htf_bars': self._level_detector.htf_bars_count,
+            'buffer_fill': self._level_detector.buffer_fill,
+            'nearest_level': nearest_level,
+            'nearest_dist': nearest_dist,
+            'last_close': last_close,
         }
