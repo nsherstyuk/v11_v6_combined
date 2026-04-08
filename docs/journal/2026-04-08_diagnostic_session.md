@@ -94,12 +94,38 @@ Sent test request to `https://api.x.ai/v1/chat/completions` — got 200 OK, "OK.
 | `664070e` | Increase historical seed from 8H to 3D so SMA(50) is ready at startup |
 | `855670a` | Increase historical seed to 5D for 4H level detection at startup |
 | `0e0b813` | Add rich diagnostic logging: formation progress, level proximity, pending retests, buffer fill |
+| `34ed566` | Session docs: 2026-04-08 diagnostic session journal + PROJECT_STATUS update |
+| `813bfb7` | Fix timeout handling: catch APITimeoutError, increase timeout to 30s, fallback bypasses confidence threshold |
+
+---
+
+### 6. Fixed Timeout Handling (Post-Documentation Fix)
+
+After the session was documented, a restart revealed the Grok call was timing out (10s default too short for reasoning model). Three sub-issues:
+
+**Bug 4: Wrong timeout exception type for sync client**
+- **Root cause:** Sync `OpenAI` client throws `openai.APITimeoutError`, not `asyncio.TimeoutError`. The retry logic never triggered — timeout fell through to `except Exception` → no retry → immediate fallback.
+- **Fix:** Added `APITimeoutError` to the caught exceptions in both `evaluate_signal()` and `evaluate_orb_signal()`.
+- **Files:** `v11/llm/grok_filter.py`
+
+**Bug 5: Mechanical fallback defeated by confidence threshold**
+- **Root cause:** On double timeout, `evaluate_orb_signal` returns `FilterDecision(approved=True, confidence=0, risk_flags=["llm_fallback"])`. But `orb_adapter._evaluate_orb_signal` checked `confidence < 75` → rejected. The whole point of the fallback is to approve mechanically.
+- **Fix:** If `"llm_fallback"` in `risk_flags`, skip the confidence threshold check.
+- **Files:** `v11/live/orb_adapter.py`
+
+**Bug 6: Default timeout too short**
+- 10s is too tight for `grok-4-1-fast-reasoning`. Increased default to 30s (retry still 5s).
+- **Files:** `v11/llm/grok_filter.py`
+
+**2 new tests:**
+- `test_api_timeout_error_triggers_retry` — verifies `APITimeoutError` is retried and falls back
+- `test_fallback_bypasses_confidence_threshold` — verifies adapter approves on mechanical fallback
 
 ---
 
 ## Test Results
 
-277 tests passing, zero regressions after all changes.
+279 tests passing (2 new), zero regressions after all changes.
 
 ---
 
