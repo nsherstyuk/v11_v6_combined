@@ -1,6 +1,6 @@
 # Project Status — All Trading Systems
 
-**Last updated:** 2026-04-06 ET (Live launch: Python 3.14 fix + LLM bypass + paper trading confirmed)  
+**Last updated:** 2026-04-08 ET (Grok LLM gate fixes + diagnostic logging + 5D historical seed)  
 **Author:** Cascade (AI pair programmer)
 
 ---
@@ -31,6 +31,8 @@ docs/
     └── 2026-04-06_phase7_run_live_session.md ← Phase 7: run_live.py multi-strategy entry point + 28 tests
     └── 2026-04-06_phase8_critical_fixes_session.md ← Phase 8: critical fixes + trade execution tests
     └── 2026-04-06_live_launch_session.md ← Live launch: Py3.14 fix, LLM bypass, status fix
+    └── 2026-04-07_orb_llm_gate_session.md ← ORB LLM gate design + DIVERGENT volume gate
+    └── 2026-04-08_diagnostic_session.md ← Grok fixes (3 bugs), diagnostic logging, 5D seed
     └── ...future sessions...
 ```
 
@@ -489,10 +491,14 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 | 4 | Build `MultiStrategyRunner` orchestrator (shared IBKR + risk) | ✅ Complete |
 | 5 | Wire V6 ORB into the runner (adapter, don't modify v6) | ✅ Complete |
 | 6 | Write tests for new modules (level detector, retest, runner) | ✅ Complete (263 tests) |
-| 7 | Paper trade EURUSD (Darvas + 4H) + XAUUSD (ORB) | ✅ **LIVE** (mechanical, --no-llm) |
+| 7 | Paper trade EURUSD (Darvas + 4H) + XAUUSD (ORB) | ✅ **LIVE** (with Grok LLM) |
 | 8 | Critical fixes + trade execution test coverage | ✅ Complete |
 | 9 | Python 3.14 compatibility + LLM bypass | ✅ Complete |
-| 10 | Stage 2: Test Grok LLM as optional enhancement | 🔲 Future |
+| 10 | Grok LLM gate for ORB + Darvas | ✅ Complete (3 bugs fixed, first live call successful) |
+| 11 | Diagnostic logging (formation progress, level proximity) | ✅ Complete |
+| 12 | Historical seed increased to 5D (SMA + levels ready at startup) | ✅ Complete |
+| 13 | Walk-forward validation | 🔲 Future |
+| 14 | Integration replay test | 🔲 Future |
 
 ### Open Questions
 
@@ -501,6 +507,9 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 3. ~~V6 ORB adapter — should we copy v6 code into v11, or import from nautilus0?~~ **RESOLVED: copied into v11/v6_orb/**
 4. ~~Combined risk management~~ **RESOLVED: RiskManager with unified daily loss limit across all strategies**
 5. **Integration replay test** — record tick stream → replay through MultiStrategyRunner → verify order flow
+6. ~~Grok LLM gate for ORB~~ **RESOLVED: sync OpenAI client, stop>=0 validator, on_bar() deferred eval**
+7. **Daily bar refresh** — ORB daily bars only loaded at startup; should refresh on daily reset
+8. **Recent 1-min bars in ORBSignalContext** — not yet included for Grok context
 
 ### Full Design
 
