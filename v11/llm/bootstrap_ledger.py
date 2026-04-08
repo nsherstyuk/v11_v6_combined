@@ -30,6 +30,7 @@ Flow:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -38,6 +39,45 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# ── Python 3.14 compatibility (same patch as run_live.py) ──────────────────
+# Python 3.14 changed asyncio.wait_for to use asyncio.timeout() internally,
+# which requires being inside a running task. ib_insync calls wait_for from
+# a sync context via nest_asyncio, which doesn't set current_task properly.
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+if sys.version_info >= (3, 14):
+    _original_wait_for = asyncio.wait_for
+
+    async def _compat_wait_for(fut, timeout, **kwargs):
+        if timeout is None:
+            return await fut
+        fut = asyncio.ensure_future(fut)
+        loop = asyncio.get_event_loop()
+        timed_out = False
+
+        def _on_timeout():
+            nonlocal timed_out
+            timed_out = True
+            fut.cancel()
+
+        handle = loop.call_later(timeout, _on_timeout)
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            if timed_out:
+                raise asyncio.TimeoutError()
+            raise
+        finally:
+            handle.cancel()
+
+    asyncio.wait_for = _compat_wait_for
+
+import nest_asyncio
+nest_asyncio.apply()
 
 # Project root
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -107,68 +147,75 @@ def fetch_ibkr_data(days: int, cache_path: Path) -> Tuple[list, list]:
     """Fetch historical bars from IBKR and cache to disk.
 
     Returns (intraday_bars, daily_bars) as lists of dicts.
+    Uses async connection inside a task for Python 3.14 compatibility.
     """
-    from ib_insync import IB, Forex, Contract
-    from v11.config.live_config import XAUUSD_INSTRUMENT
 
-    ib = IB()
-    print("Connecting to IBKR...")
-    ib.connect("127.0.0.1", 4002, clientId=99, timeout=20)
-    print(f"Connected: {ib.isConnected()}")
+    async def _fetch():
+        from ib_insync import IB, Contract
+        from v11.config.live_config import XAUUSD_INSTRUMENT
 
-    # Build XAUUSD contract
-    contract = Contract(
-        symbol=XAUUSD_INSTRUMENT.symbol,
-        exchange=XAUUSD_INSTRUMENT.exchange,
-        secType=XAUUSD_INSTRUMENT.sec_type,
-        currency=XAUUSD_INSTRUMENT.currency,
-    )
-    ib.qualifyContracts(contract)
+        ib = IB()
+        print("Connecting to IBKR...")
+        await ib.connectAsync("127.0.0.1", 4002, clientId=99, timeout=20)
+        print(f"Connected: {ib.isConnected()}")
 
-    # Fetch 5-min bars (covers more days than 1-min)
-    duration = f"{days} D"
-    print(f"Fetching {duration} of 5-min bars for XAUUSD...")
-    bars_5m = ib.reqHistoricalData(
-        contract, endDateTime="",
-        durationStr=duration, barSizeSetting="5 mins",
-        whatToShow="MIDPOINT", useRTH=False, formatDate=2)
-    print(f"  Got {len(bars_5m)} 5-min bars")
+        # Build XAUUSD contract
+        contract = Contract(
+            symbol=XAUUSD_INSTRUMENT.symbol,
+            exchange=XAUUSD_INSTRUMENT.exchange,
+            secType=XAUUSD_INSTRUMENT.sec_type,
+            currency=XAUUSD_INSTRUMENT.currency,
+        )
+        ib.qualifyContracts(contract)
 
-    intraday = []
-    for b in bars_5m:
-        dt = b.date
-        if hasattr(dt, 'tzinfo') and dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        intraday.append({
-            "date": dt.isoformat() if hasattr(dt, 'isoformat') else str(dt),
-            "open": b.open,
-            "high": b.high,
-            "low": b.low,
-            "close": b.close,
-            "volume": getattr(b, 'volume', 0),
-        })
+        # Fetch 5-min bars (covers more days than 1-min)
+        duration = f"{days} D"
+        print(f"Fetching {duration} of 5-min bars for XAUUSD...")
+        bars_5m = await ib.reqHistoricalDataAsync(
+            contract, endDateTime="",
+            durationStr=duration, barSizeSetting="5 mins",
+            whatToShow="MIDPOINT", useRTH=False, formatDate=2)
+        print(f"  Got {len(bars_5m)} 5-min bars")
 
-    # Fetch daily bars for context (30 days)
-    print("Fetching 30 daily bars for XAUUSD context...")
-    bars_daily = ib.reqHistoricalData(
-        contract, endDateTime="",
-        durationStr="30 D", barSizeSetting="1 day",
-        whatToShow="MIDPOINT", useRTH=False, formatDate=2)
-    print(f"  Got {len(bars_daily)} daily bars")
+        intraday = []
+        for b in bars_5m:
+            dt = b.date
+            if hasattr(dt, 'tzinfo') and dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            intraday.append({
+                "date": dt.isoformat() if hasattr(dt, 'isoformat') else str(dt),
+                "open": b.open,
+                "high": b.high,
+                "low": b.low,
+                "close": b.close,
+                "volume": getattr(b, 'volume', 0),
+            })
 
-    daily = []
-    for b in bars_daily:
-        dt = b.date
-        daily.append({
-            "date": str(dt),
-            "open": b.open,
-            "high": b.high,
-            "low": b.low,
-            "close": b.close,
-        })
+        # Fetch daily bars for context (30 days)
+        print("Fetching 30 daily bars for XAUUSD context...")
+        bars_daily = await ib.reqHistoricalDataAsync(
+            contract, endDateTime="",
+            durationStr="30 D", barSizeSetting="1 day",
+            whatToShow="MIDPOINT", useRTH=False, formatDate=2)
+        print(f"  Got {len(bars_daily)} daily bars")
 
-    ib.disconnect()
-    print("IBKR disconnected.")
+        daily = []
+        for b in bars_daily:
+            dt = b.date
+            daily.append({
+                "date": str(dt),
+                "open": b.open,
+                "high": b.high,
+                "low": b.low,
+                "close": b.close,
+            })
+
+        ib.disconnect()
+        print("IBKR disconnected.")
+        return intraday, daily
+
+    loop = asyncio.get_event_loop()
+    intraday, daily = loop.run_until_complete(_fetch())
 
     # Cache to disk
     cache_data = {"intraday": intraday, "daily": daily,
@@ -244,13 +291,10 @@ def call_grok_for_day(
         daily_bars=daily_bar_models,
     )
 
-    # Call Grok (using event loop since evaluate_orb_signal is async)
-    loop = asyncio.new_event_loop()
-    try:
-        decision = loop.run_until_complete(
-            grok_filter.evaluate_orb_signal(context))
-    finally:
-        loop.close()
+    # Call Grok (using existing event loop — nest_asyncio allows re-entrant calls)
+    loop = asyncio.get_event_loop()
+    decision = loop.run_until_complete(
+        grok_filter.evaluate_orb_signal(context))
 
     return {
         "approved": decision.approved,
