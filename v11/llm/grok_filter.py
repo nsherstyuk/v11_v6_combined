@@ -21,6 +21,7 @@ from openai import OpenAI, APITimeoutError
 from pydantic import ValidationError
 
 from .base import LLMFilter
+from .decision_ledger import DecisionLedger
 from .models import SignalContext, LLMResponse, ORBSignalContext
 from .prompt_templates import (
     SYSTEM_PROMPT, build_signal_prompt,
@@ -55,6 +56,17 @@ class GrokFilter:
         if self._log_dir:
             self._log_dir.mkdir(parents=True, exist_ok=True)
 
+        # Decision ledger for feedback loop
+        self._ledger = DecisionLedger(log_dir) if log_dir else None
+        self._feedback_table: str = ""
+        if self._ledger:
+            self._feedback_table = self._ledger.build_feedback_table()
+            if self._feedback_table:
+                logger.info(
+                    f"Loaded decision feedback: {self._ledger.stats}")
+            else:
+                logger.info("Decision ledger: no assessed decisions yet")
+
     async def evaluate_signal(self, context: SignalContext) -> FilterDecision:
         """Evaluate a breakout signal via Grok.
 
@@ -62,7 +74,7 @@ class GrokFilter:
         Logs every request/response pair to grok_logs/.
         """
         context_json = context.model_dump_json(indent=2)
-        prompt = build_signal_prompt(context_json)
+        prompt = build_signal_prompt(context_json, feedback=self._feedback_table)
 
         start_time = time.monotonic()
         raw_response = None
@@ -100,6 +112,28 @@ class GrokFilter:
                 f"approved={decision.approved} conf={decision.confidence} "
                 f"latency={latency:.1f}s"
             )
+
+            # Record to decision ledger
+            if self._ledger:
+                self._ledger.record_decision(
+                    strategy="DARVAS" if context.signal_type == "DARVAS_BREAKOUT" else "4H_RETEST",
+                    instrument=context.instrument,
+                    decision="APPROVE" if decision.approved else "REJECT",
+                    confidence=decision.confidence,
+                    reasoning=decision.reasoning,
+                    risk_flags=list(decision.risk_flags),
+                    context={
+                        "direction": context.direction,
+                        "breakout_price": context.breakout_price,
+                        "entry_price": decision.entry_price,
+                        "stop_price": decision.stop_price,
+                        "target_price": decision.target_price,
+                        "box_top": context.box_top,
+                        "box_bottom": context.box_bottom,
+                        "atr": context.atr,
+                        "session": context.session,
+                    },
+                )
 
             # Log the conversation
             self._log_conversation(
@@ -211,7 +245,7 @@ class GrokFilter:
         mechanical approval because the ORB edge exists without the LLM.
         """
         context_json = context.model_dump_json(indent=2)
-        prompt = build_orb_signal_prompt(context_json)
+        prompt = build_orb_signal_prompt(context_json, feedback=self._feedback_table)
         start_time = time.monotonic()
         raw_response = None
 
@@ -250,6 +284,26 @@ class GrokFilter:
                     f"ORB LLM [{self._model}] {context.instrument}: "
                     f"approved={decision.approved} conf={decision.confidence} "
                     f"latency={latency:.1f}s")
+
+                # Record to decision ledger
+                if self._ledger:
+                    self._ledger.record_decision(
+                        strategy="ORB",
+                        instrument=context.instrument,
+                        decision="APPROVE" if decision.approved else "REJECT",
+                        confidence=decision.confidence,
+                        reasoning=decision.reasoning,
+                        risk_flags=list(decision.risk_flags),
+                        context={
+                            "range_high": context.range_high,
+                            "range_low": context.range_low,
+                            "range_size": context.range_size,
+                            "range_vs_avg": context.range_vs_avg,
+                            "current_price": context.current_price,
+                            "session": context.session,
+                            "day_of_week": context.day_of_week,
+                        },
+                    )
 
                 self._log_conversation(
                     context=context,
