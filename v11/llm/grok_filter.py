@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from openai import AsyncOpenAI
+from openai import OpenAI
 from pydantic import ValidationError
 
 from .base import LLMFilter
@@ -45,7 +45,7 @@ class GrokFilter:
         timeout: float = 10.0,
         log_dir: Optional[str] = None,
     ):
-        self._client = AsyncOpenAI(
+        self._client = OpenAI(
             api_key=api_key,
             base_url="https://api.x.ai/v1",
         )
@@ -69,7 +69,7 @@ class GrokFilter:
         error_msg = None
 
         try:
-            response = await self._client.chat.completions.create(
+            response = self._client.chat.completions.create(
                 model=self._model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
@@ -221,7 +221,7 @@ class GrokFilter:
             raw_response = None
 
             try:
-                response = await self._client.chat.completions.create(
+                response = self._client.chat.completions.create(
                     model=self._model,
                     messages=[
                         {"role": "system", "content": ORB_SYSTEM_PROMPT},
