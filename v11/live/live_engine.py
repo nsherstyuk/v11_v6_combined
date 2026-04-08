@@ -16,7 +16,7 @@ from collections import deque
 from datetime import datetime
 from typing import Optional, List
 
-from ..core.types import Bar, BreakoutSignal, VolumeAnalysis, Direction
+from ..core.types import Bar, BreakoutSignal, VolumeAnalysis, Direction, ImbalanceClassification
 from ..core.darvas_detector import DarvasDetector
 from ..core.imbalance_classifier import ImbalanceClassifier
 from ..core.htf_sma_filter import IncrementalHTFSMAFilter
@@ -183,6 +183,14 @@ class InstrumentEngine:
 
         # Volume analysis enrichment
         volume = self._build_volume_analysis(signal)
+
+        # Volume imbalance gate (Decision #18: DIVERGENT rejects mechanically)
+        if volume.classification == ImbalanceClassification.DIVERGENT:
+            self._log.info(
+                f"{self.pair_name}: VOLUME REJECTED — "
+                f"{volume.classification.value} "
+                f"(buy_ratio={volume.buy_ratio_at_breakout:.3f})")
+            return
 
         # Build LLM context
         context = self._build_signal_context(signal, volume, bar)
