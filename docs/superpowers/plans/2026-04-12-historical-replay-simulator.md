@@ -10,6 +10,21 @@
 
 **Spec:** `docs/superpowers/specs/2026-04-12-historical-replay-simulator-design.md`
 
+**Review:** `C:\Users\nsher\.windsurf\plans\historical-replay-simulator-review-3170d9.md`
+
+### Review adjustments incorporated
+
+| Review Issue | Resolution |
+|---|---|
+| #1 Python 3.14 asyncio patch | Added to Task 6 (run_replay.py) — same patch as run_live.py |
+| #2 Session splitting / detector reset | **Disagree**: detectors are NOT reset between sessions, matching live behavior. Session gaps are logged as `SESSION_GAP` events for observability. If stale state causes bugs, that's what we want to discover. |
+| #3 TradeManager dry_run path | Confirmed working, no changes needed |
+| #4 CachedFilter ORB stub | Confirmed adequate, no changes needed |
+| #5 Trade exit detection fragility | Fixed in Task 5: use both `daily_trades` counter AND `was_in_trade → not in_trade` state transition |
+| #6 data_loader path | Confirmed working, no changes needed |
+| #7 RiskManager constructor | Confirmed matching, no changes needed |
+| #8 LiveConfig constructor | Verified: LiveConfig is a dataclass with defaults, keyword args work. `max_daily_trades` (LiveConfig, per-instrument) vs `max_daily_trades_per_strategy` (RiskManager) are different knobs — both wired correctly |
+
 ---
 
 ## File Structure
@@ -701,7 +716,7 @@ class EventLogger:
             "normal": {
                 "TRADE_ENTERED", "TRADE_EXITED", "SIGNAL_APPROVED",
                 "SIGNAL_REJECTED", "LLM_RESPONSE", "RISK_LIMIT_HIT",
-                "DAILY_RESET", "SESSION_START",
+                "DAILY_RESET", "SESSION_START", "SESSION_GAP",
             },
             "verbose": None,  # None = show all
         }
@@ -764,6 +779,9 @@ class EventLogger:
         elif event == "SESSION_START":
             bars = data.get("bars", 0)
             print(f"  [{ts}] {inst} SESSION START ({bars} bars)")
+        elif event == "SESSION_GAP":
+            gap = data.get("gap_minutes", 0)
+            print(f"  [{ts}] {inst} SESSION GAP ({gap:.0f} min)")
         else:
             print(f"  [{ts}] {inst} {strategy} {event}")
 
@@ -1279,12 +1297,29 @@ class ReplayRunner:
                       "replay_bars": len(replay_bars)},
             )
 
-            # Track current date for daily resets
+            # Track current date for daily resets and previous bar for gap detection
             current_date: Optional[str] = None
+            prev_bar: Optional[Bar] = None
 
             # Replay loop
+            # NOTE (Review #2): Detectors are NOT reset between session gaps.
+            # This matches live behavior where the system runs continuously.
+            # If stale state across weekends causes bugs, that's exactly what
+            # we want the replay to discover. Gaps are logged for observability.
             for i, bar in enumerate(replay_bars):
                 bar_date = bar.timestamp.strftime("%Y-%m-%d")
+
+                # Session gap detection (Review #2: log but don't reset)
+                if prev_bar is not None:
+                    gap_minutes = (bar.timestamp - prev_bar.timestamp).total_seconds() / 60
+                    if gap_minutes > 30:
+                        self._event_logger.emit(
+                            "SESSION_GAP", strategy="ALL", instrument=instrument,
+                            timestamp=bar.timestamp.isoformat(),
+                            data={"gap_minutes": round(gap_minutes, 1),
+                                  "prev_bar": prev_bar.timestamp.isoformat()},
+                        )
+                prev_bar = bar
 
                 # Daily reset on date change
                 if current_date is not None and bar_date != current_date:
@@ -1310,7 +1345,7 @@ class ReplayRunner:
 
                     await engine.on_bar(bar)
 
-                    # Detect trade entry
+                    # Detect trade entry (Review #5: state transition check)
                     if not was_in_trade and tm.in_trade:
                         self._event_logger.emit(
                             "TRADE_ENTERED", strategy=engine.strategy_name,
@@ -1325,8 +1360,10 @@ class ReplayRunner:
                             },
                         )
 
-                    # Detect trade exit (daily_trades counter incremented)
-                    if tm.daily_trades > trades_before:
+                    # Detect trade exit (Review #5: dual check — counter + state)
+                    # Primary: daily_trades counter incremented (reliable)
+                    # Secondary: was_in_trade but no longer (catches edge cases)
+                    if tm.daily_trades > trades_before or (was_in_trade and not tm.in_trade):
                         pnl_delta = tm.daily_pnl - pnl_before
                         self._event_logger.emit(
                             "TRADE_EXITED", strategy=engine.strategy_name,
@@ -1434,11 +1471,55 @@ Usage:
 """
 from __future__ import annotations
 
-import argparse
 import asyncio
+import argparse
 import logging
 import sys
 from datetime import datetime
+
+# ── Python 3.14 compatibility (Review #1) ───────────────────────────────────
+# Same patch as v11/live/run_live.py lines 27-68.
+# Python 3.14 changed asyncio.wait_for to use asyncio.timeout() internally,
+# which requires being inside a running task. ib_insync calls wait_for from
+# a sync context via nest_asyncio, which doesn't set current_task properly.
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+if sys.version_info >= (3, 14):
+    _original_wait_for = asyncio.wait_for
+
+    async def _compat_wait_for(fut, timeout, **kwargs):
+        if timeout is None:
+            return await fut
+        fut = asyncio.ensure_future(fut)
+        loop = asyncio.get_event_loop()
+        timed_out = False
+
+        def _on_timeout():
+            nonlocal timed_out
+            timed_out = True
+            fut.cancel()
+
+        handle = loop.call_later(timeout, _on_timeout)
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            if timed_out:
+                raise asyncio.TimeoutError()
+            raise
+        finally:
+            handle.cancel()
+
+    asyncio.wait_for = _compat_wait_for
+
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    pass
+# ── End Python 3.14 compatibility ───────────────────────────────────────────
 
 from ..backtest.data_loader import load_instrument_bars
 from .config import ReplayConfig
