@@ -199,14 +199,24 @@ The prior session tested 5 models in replay (DeepSeek V3 won). Consider:
 2. A/B testing: alternate models by day and compare results
 3. Adding model name to the decision ledger for per-model accuracy tracking
 
+### Priority 6: IBKR auto-reconnect and unattended 24/5 operation
+
+**Full plan document**: `docs/journal/2026-04-14_ibkr_auto_reconnect_plan.md`
+
+The system cannot survive IBKR daily maintenance, weekly re-auth, or Gateway crashes. The plan covers:
+- **IBC** (external tool) for Gateway auto-login and weekly re-authentication
+- **V11 code hardening**: retry limits, emergency close, price feed monitoring, orphan handling, risk manager sync, daily reset alignment, auto-restart wrapper script
+- ~200 lines of code changes across 3-4 files
+
 ---
 
 ## 7. How to Get Oriented
 
 1. **Start here**: Read this file for what just happened
-2. **Prior session context**: `docs/journal/2026-04-13_llm_filtering_enhancements.md` — the LLM filtering work this review covered
-3. **Full project state**: `docs/PROJECT_STATUS.md` — all projects, architecture, folder roles
-4. **V11 architecture**: `docs/V11_DESIGN.md` — strategy design, LLM integration, data flow
+2. **IBKR reconnect plan**: `docs/journal/2026-04-14_ibkr_auto_reconnect_plan.md` — research + implementation plan for 24/5 operation
+3. **Prior session context**: `docs/journal/2026-04-13_llm_filtering_enhancements.md` — the LLM filtering work this review covered
+4. **Full project state**: `docs/PROJECT_STATUS.md` — all projects, architecture, folder roles
+5. **V11 architecture**: `docs/V11_DESIGN.md` — strategy design, LLM integration, data flow
 5. **Run tests**: `python -m pytest v11/tests/ -v` — should see 345 passed
 
 ### Key code paths to understand
