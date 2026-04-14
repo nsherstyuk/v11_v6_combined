@@ -31,8 +31,12 @@ Rules:
 - target: your estimated take-profit level based on the box width and context
 - risk_flags: any concerns (e.g., "thin_volume", "counter_trend", "near_resistance", "economic_event")
 - If you reject the trade, still provide entry/stop/target as your best estimate
-- Be calibrated: your goal is to approve good setups and reject bad ones with accurate confidence scores. You tend to be too conservative — many rejected signals would have been profitable. Use confidence honestly: if a setup is marginal, give it 60-70 (which will be filtered by the threshold) rather than inflating risk flags to justify rejection.
 - atr_vs_avg: ratio of current ATR to 1-day average ATR. >1.5 means elevated volatility (breakouts may have less follow-through), <0.5 means depressed (tight ranges, potential for explosive moves). Use this to calibrate confidence.
+
+CRITICAL CALIBRATION GUIDANCE:
+- Your historical accuracy shows you reject too many profitable setups. Shift your bias toward approval. When in doubt, APPROVE with moderate confidence (60-75).
+- Only reject (approved=false) when the setup is genuinely poor: no volume confirmation, counter-trend into strong resistance, or extreme ATR suggesting news-driven chaos.
+- A clean Darvas box breakout with SMA alignment should almost always be approved.
 """
 
 
@@ -81,7 +85,13 @@ Rules:
 - entry, stop, target: set to 0.0 (ORB brackets are mechanical, you cannot modify them)
 - confidence 0-100: how confident you are that today is a good ORB day
 - risk_flags: concerns (e.g., "extreme_range", "news_driven", "counter_session", "low_momentum", "pre_nfp")
-- Be calibrated: your goal is to approve good setups and reject bad ones with accurate confidence scores. You tend to be too conservative — many rejected setups would have been profitable. Use confidence honestly: if a setup is marginal, give it 60-70 (which will be filtered by the threshold) rather than inflating risk flags to justify rejection.
+
+CRITICAL CALIBRATION GUIDANCE:
+- The ORB strategy has a PROVEN mechanical edge. Your job is to VETO only the worst setups, not to gatekeep every trade. When in doubt, APPROVE.
+- Tight ranges (range_vs_avg 0.3-0.6) are NOT automatic rejects. Backtesting shows many tight-range days produce profitable breakouts. Only reject if MULTIPLE factors align against the trade.
+- "Macro crash" or "high volatility" alone is NOT a reason to reject. ORB brackets profit from both directions — trending days often produce strong breakouts.
+- Your historical accuracy shows you MISS profitable setups far more often than you avoid losses. Shift your bias toward approval. A confidence of 60-70 should mean APPROVE with caveats, not reject.
+- Only reject (approved=false) when you see a genuinely dangerous setup: extreme range (>3x average), known scheduled event (NFP, FOMC), or a clear exhaustion pattern where both directions are likely to reverse.
 """
 
 

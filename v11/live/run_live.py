@@ -67,6 +67,7 @@ try:
 except ImportError:
     pass
 
+import json
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -161,12 +162,18 @@ class V11LiveTrader:
         XAUUSD: V6 ORB (own execution engine via adapter)
     """
 
+    # Max disconnect duration before emergency shutdown (seconds)
+    MAX_DISCONNECT_SECONDS = 300  # 5 minutes — must match IBKRConnection.MAX_RECONNECT_DURATION
+
     def __init__(self, live_cfg: LiveConfig, log: logging.Logger,
                  use_llm: bool = True):
         self.live_cfg = live_cfg
         self.log = log
         self._shutdown = False
         self._current_trading_date: str = ""  # for daily reset detection
+        self._disconnect_start: Optional[float] = None  # epoch time of first disconnect
+        self._last_price_time: dict[str, float] = {}  # pair -> epoch of last price update
+        self._session_reset_done: bool = False  # 5 PM ET broker session reset guard
 
         # IBKR connection (shared)
         self.conn = IBKRConnection(
@@ -363,28 +370,66 @@ class V11LiveTrader:
             try:
                 was_connected = self.conn.connected
                 if not self.conn.ensure_connected():
-                    self.log.error("Connection lost — waiting 10s")
+                    # Track disconnect duration
+                    if self._disconnect_start is None:
+                        self._disconnect_start = time.time()
+                    elapsed = time.time() - self._disconnect_start
+
+                    if elapsed > self.MAX_DISCONNECT_SECONDS:
+                        self.log.critical(
+                            f"IBKR down for {elapsed:.0f}s — EMERGENCY SHUTDOWN")
+                        self._emergency_shutdown("persistent_ibkr_failure")
+                        break
+
+                    self.log.error(
+                        f"Connection lost — waiting 10s "
+                        f"(down {elapsed:.0f}s/{self.MAX_DISCONNECT_SECONDS}s)")
                     time.sleep(10)
                     continue
+
+                # Reconnected — clear timer and reconcile
+                if self._disconnect_start is not None:
+                    self.log.info(
+                        f"Reconnected after {time.time() - self._disconnect_start:.0f}s")
+                    self._disconnect_start = None
                 if not was_connected and self.conn.connected:
                     # Just reconnected — reconcile positions
                     self._reconcile_positions()
 
                 now = datetime.now(timezone.utc)
 
-                # Daily reset at date change (UTC)
+                # Daily reset at date change (UTC midnight)
                 today_str = now.strftime("%Y-%m-%d")
                 if self._current_trading_date and today_str != self._current_trading_date:
                     self.log.info(
                         f"Date changed {self._current_trading_date} -> {today_str} -- "
                         f"resetting daily counters")
                     self.runner.reset_daily()
+                    self._session_reset_done = False  # allow 5 PM ET reset for new day
                 self._current_trading_date = today_str
+
+                # Broker session reset at 5 PM ET (FX market close)
+                # This aligns PnL limits with the actual trading session boundary
+                from zoneinfo import ZoneInfo
+                et_now = now.astimezone(ZoneInfo("America/New_York"))
+                if (et_now.hour == 17 and et_now.minute < 2
+                        and not self._session_reset_done
+                        and et_now.weekday() < 5):  # Mon-Fri only
+                    self.log.info(
+                        f"5 PM ET broker session close — resetting daily counters")
+                    self.runner.reset_daily()
+                    self._session_reset_done = True
+                # Clear the guard after 6 PM ET so next day can trigger again
+                if et_now.hour >= 18:
+                    self._session_reset_done = False
 
                 for pair in self._active_pairs:
                     price = self.conn.get_mid_price(pair)
                     if price is None:
                         continue
+
+                    # Track price freshness
+                    self._last_price_time[pair] = time.time()
 
                     completed_bar = self.runner.on_price(pair, price, now)
                     if completed_bar is not None:
@@ -393,6 +438,7 @@ class V11LiveTrader:
 
                 # Periodic status log (every 5 minutes)
                 if time.time() - last_status_log > 300:
+                    self._check_price_staleness()
                     self._log_status()
                     last_status_log = time.time()
 
@@ -475,11 +521,165 @@ class V11LiveTrader:
                 f"bars={s.get('bar_count', 0)} "
                 f"in_trade={s.get('in_trade', False)}{extra}")
 
+    def _check_price_staleness(self) -> None:
+        """Check for stale price feeds and log warnings/errors."""
+        now = time.time()
+        for pair in self._active_pairs:
+            last = self._last_price_time.get(pair)
+            if last is None:
+                # Never received a price — only warn if connected
+                if self.conn.connected:
+                    self.log.warning(
+                        f"PRICE STALE: {pair} — no price received since startup")
+                continue
+            stale_s = now - last
+            if stale_s > 300:
+                self.log.error(
+                    f"PRICE STALE: {pair} — no price for {stale_s:.0f}s "
+                    f"(>300s). Attempting market data stream restart.")
+                # Try restarting the market data stream
+                try:
+                    contract = self.conn._contracts.get(pair)
+                    if contract:
+                        # Cancel old stream
+                        try:
+                            self.conn.ib.cancelMktData(contract)
+                        except Exception:
+                            pass
+                        # Re-subscribe
+                        ticker = self.conn.ib.reqMktData(
+                            contract, '', snapshot=False,
+                            regulatorySnapshot=False)
+                        self.conn.ib.sleep(2)
+                        self.conn._tickers[pair] = ticker
+                        self.log.info(f"Restarted market data stream for {pair}")
+                except Exception as e:
+                    self.log.error(f"Failed to restart stream for {pair}: {e}")
+            elif stale_s > 60:
+                self.log.warning(
+                    f"PRICE STALE: {pair} — no price for {stale_s:.0f}s")
+
     def _reconcile_positions(self) -> None:
-        """Reconcile internal trade state with broker after reconnect."""
+        """Reconcile internal trade state with broker after reconnect.
+
+        Two-level reconciliation:
+        1. TradeManager: per-instrument internal state vs broker
+        2. RiskManager: portfolio-level position tracking vs broker
+        """
         self.log.info("Reconciling positions after reconnect...")
+
+        # 1. Per-instrument reconciliation (TradeManager handles orphan detection)
         for feed in self.runner.feeds.values():
             feed.trade_manager.reconcile_position()
+
+        # 2. Portfolio-level reconciliation (RiskManager vs broker)
+        try:
+            broker_positions = self.conn.ib.positions()
+        except Exception as e:
+            self.log.error(f"Failed to query broker positions: {e}")
+            return
+
+        # Build set of instruments with broker positions
+        broker_instruments = set()
+        for pos in broker_positions:
+            pair = f"{pos.contract.symbol}{pos.contract.currency}"
+            # Match against our configured instruments
+            for inst in self.live_cfg.instruments:
+                if inst.symbol == pos.contract.symbol and abs(pos.position) > 0:
+                    broker_instruments.add(inst.pair_name)
+                    break
+
+        # Risk manager thinks these instruments have positions
+        rm_positions = set(self.risk_manager._positions.keys())
+
+        # Broker has position but risk manager doesn't know
+        for inst in broker_instruments - rm_positions:
+            self.log.warning(
+                f"SYNC: Broker has position on {inst} but risk manager doesn't. "
+                f"Adding to risk manager.")
+            # Find which strategy owns it from TradeManager
+            for feed in self.runner.feeds.values():
+                if feed.inst_config.pair_name == inst and feed.trade_manager.in_trade:
+                    self.risk_manager.record_trade_entry(
+                        inst, feed.trade_manager._strategy_name
+                        if hasattr(feed.trade_manager, '_strategy_name')
+                        else "UNKNOWN")
+
+        # Risk manager thinks there's a position but broker doesn't
+        for inst in rm_positions - broker_instruments:
+            self.log.warning(
+                f"SYNC: Risk manager thinks {inst} has position but broker is flat. "
+                f"Removing from risk manager.")
+            strategy = self.risk_manager._positions.get(inst, "UNKNOWN")
+            self.risk_manager.record_trade_exit(inst, strategy, pnl=0.0)
+
+        self.log.info(
+            f"Reconciliation complete: broker={broker_instruments}, "
+            f"risk_mgr={rm_positions}")
+
+    def _emergency_shutdown(self, reason: str) -> None:
+        """Emergency shutdown: log state, attempt to close positions, write state file, exit."""
+        self.log.critical(f"EMERGENCY SHUTDOWN: {reason}")
+
+        # Log all open positions
+        status = self.runner.get_all_status()
+        risk = status['risk']
+        self.log.critical(
+            f"Emergency state: PnL=${risk['combined_pnl']:+.2f} "
+            f"trades={risk['combined_trades']} "
+            f"positions={risk['open_positions']}")
+
+        # Try to cancel all open orders
+        try:
+            self.conn.cancel_all_orders()
+            self.log.info("Cancelled all open orders")
+        except Exception as e:
+            self.log.error(f"Failed to cancel orders: {e}")
+
+        # Try one final reconnect to close positions
+        if not self.conn.connected:
+            self.log.info("Attempting final reconnect to close positions...")
+            try:
+                if self.conn.connect():
+                    for feed in self.runner.feeds.values():
+                        tm = feed.trade_manager
+                        if tm.in_trade:
+                            self.log.critical(
+                                f"Emergency closing {tm._inst.pair_name} "
+                                f"dir={tm._direction} qty={tm._qty}")
+                            try:
+                                tm.emergency_close("EMERGENCY_SHUTDOWN")
+                            except Exception as e:
+                                self.log.error(f"Emergency close failed: {e}")
+            except Exception as e:
+                self.log.error(f"Final reconnect failed: {e}")
+
+        # Write emergency state file for post-mortem
+        state_dir = ROOT / "v11" / "live" / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file = state_dir / "emergency_shutdown.json"
+        try:
+            state = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "reason": reason,
+                "pnl": risk['combined_pnl'],
+                "trades": risk['combined_trades'],
+                "positions": risk['open_positions'],
+                "strategies": status['strategies'],
+            }
+            state_file.write_text(json.dumps(state, indent=2, default=str))
+            self.log.info(f"Emergency state written to {state_file}")
+        except Exception as e:
+            self.log.error(f"Failed to write emergency state: {e}")
+
+        # Clean up and exit with error code
+        self._cleanup()
+        try:
+            self.conn.disconnect()
+        except Exception:
+            pass
+        self.log.critical("V11 exiting with error code 1 — wrapper script should restart")
+        sys.exit(1)
 
     def _cleanup(self) -> None:
         """Clean up on shutdown. ORB adapter handles its own cleanup."""
@@ -542,7 +742,8 @@ def main():
     use_llm = not args.no_llm
     log.info(f"  LLM:         {'grok (active)' if use_llm else 'DISABLED'}")
     if use_llm:
-        log.info(f"  Confidence:  >= {live_cfg.llm_confidence_threshold}")
+        log.info(f"  Confidence:  Darvas >= {live_cfg.llm_confidence_threshold}, "
+                 f"ORB >= {live_cfg.orb_confidence_threshold}")
     log.info(f"  Daily loss:  ${live_cfg.max_daily_loss:.0f}")
     log.info("=" * 60)
 

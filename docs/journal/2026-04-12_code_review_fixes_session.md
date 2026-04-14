@@ -140,9 +140,37 @@ These are the things the next agent should be aware of:
 
 8. **No integration test for the full LLM gate flow in live** — we test individual pieces but not the end-to-end: tick arrives → RANGE_READY → LLM gate pending → on_bar fires → LLM evaluates → approved/rejected.
 
+9. **CRITICAL: Bootstrap ledger was poisoning LLM decisions** (diagnosed 2026-04-14). The bootstrap created 15 ORB decisions with 60% MISSED rate (LLM rejected profitable setups). This feedback was telling the LLM "you're too conservative" but instead of learning, the LLM kept rejecting everything. Live system only took 2 trades in 4 weeks (expected ~12). **Fix applied**: cleared ledger, strengthened prompt, lowered ORB threshold to 55. See section 6.0 below.
+
 ---
 
 ## 6. Forward-Looking Plan for Next Agent
+
+### Priority 0: LLM Trading Performance Fix (APPLIED 2026-04-14)
+
+**Problem diagnosed**: The live decision ledger was poisoned by bootstrap data:
+- 17 decisions: 14 REJECT, only 2 APPROVE
+- Of 15 assessed: 9 MISSED (60%), 5 CORRECT (33%), 1 WRONG (7%)
+- The LLM rejected profitable setups at conf=85-95 because it saw "tight range" or "macro crash"
+- Expected ~3.1 trades/week, actual was ~0.5 trades/week — system was effectively off
+
+**Trade frequency estimates**:
+| Source | Trades/Week |
+|---|---|
+| XAUUSD ORB (replay, with LLM) | ~2.4 |
+| EURUSD Darvas + 4H Retest (OOS) | ~0.7 |
+| Combined expected | ~3.1 |
+| Actual live (was) | ~0.5 |
+
+**Fixes applied**:
+1. **Cleared poisoned ledger** — backed up to `grok_logs/decision_ledger_bootstrap_backup_20260414.json`, live ledger reset to empty. LLM starts fresh with no biased feedback.
+2. **Strengthened prompts** (`prompt_templates.py`) — explicit guidance that tight ranges are NOT automatic rejects, LLM should approve by default and only veto the worst setups, "when in doubt APPROVE".
+3. **Per-strategy confidence thresholds** — ORB lowered from 75 to 55 (`live_config.py: orb_confidence_threshold`), Darvas stays at 75. ORB has a proven mechanical edge; the LLM is an optional quality filter, not a gatekeeper.
+
+**What to monitor**: After restart, watch for:
+- ORB approval rate should be >50% (was 7%)
+- If still rejecting everything → consider `--no-llm` for ORB until prompt is further tuned
+- First few decisions will have no feedback table (empty ledger) — this is intentional
 
 ### Priority 1: Improve Darvas LLM accuracy (currently 48%)
 

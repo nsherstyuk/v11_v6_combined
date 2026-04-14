@@ -194,6 +194,7 @@ class MultiStrategyRunner:
                 log=self._log,
                 trade_log_dir=trade_log_dir,
                 dry_run=self._live_config.dry_run,
+                auto_close_orphans=getattr(self._live_config, 'auto_close_orphans', False),
             )
 
             # Wire auto-assessment callback for Darvas/Retest decisions
@@ -307,7 +308,7 @@ class MultiStrategyRunner:
             dry_run=self._live_config.dry_run,
             poll_interval=poll_interval,
             llm_filter=self._llm_filter,
-            llm_confidence_threshold=self._live_config.llm_confidence_threshold,
+            llm_confidence_threshold=self._live_config.orb_confidence_threshold,
         )
 
         feed.add_strategy(adapter)

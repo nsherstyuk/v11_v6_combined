@@ -92,7 +92,8 @@ class LiveConfig:
     # LLM filter settings
     llm_model: str = "deepseek/deepseek-chat-v3-0324"
     llm_base_url: str = "https://openrouter.ai/api/v1"  # OpenAI-compatible endpoint (xAI, OpenRouter, etc.)
-    llm_confidence_threshold: int = 75      # minimum confidence to approve trade
+    llm_confidence_threshold: int = 75      # default confidence threshold (Darvas/Retest)
+    orb_confidence_threshold: int = 55       # ORB threshold — lower because mechanical edge exists
     llm_timeout_seconds: float = 10.0       # max wait for LLM response
     llm_bars_context: int = 200             # 1-min bars to send to LLM
     llm_daily_bars_context: int = 30        # daily bars to send to LLM
@@ -108,6 +109,9 @@ class LiveConfig:
 
     # Dry run mode
     dry_run: bool = True
+
+    # Reconnection safety
+    auto_close_orphans: bool = False  # auto-close orphaned broker positions on reconnect
 
     # Logging
     grok_log_dir: str = "grok_logs"
