@@ -101,6 +101,12 @@ class InstrumentEngine:
         # Bar counter
         self._bar_count: int = 0
 
+        # Slow ATR for regime context (1440 bars = 1 day of 1-min bars)
+        self._slow_atr_period: int = 1440
+        self._slow_atr: float = 0.0
+        self._slow_atr_count: int = 0
+        self._slow_atr_prev_close: float = 0.0
+
         # Last known price (for slippage ceiling check after LLM latency)
         self._last_price: float = 0.0
 
@@ -139,6 +145,7 @@ class InstrumentEngine:
         self._classifier.add_bar(bar)
         if self._sma_filter is not None:
             self._sma_filter.add_bar(bar)
+        self._update_slow_atr(bar)
         self._bar_count += 1
 
         # Check exit first (if in trade)
@@ -341,6 +348,9 @@ class InstrumentEngine:
         # Determine trading session
         session = self._determine_session(bar.timestamp)
 
+        # Compute ATR regime (fast ATR / slow ATR)
+        atr_vs_avg = signal.atr / self._slow_atr if self._slow_atr > 0 else 1.0
+
         return SignalContext(
             direction=signal.direction.value,
             instrument=self.inst_config.pair_name,
@@ -350,6 +360,7 @@ class InstrumentEngine:
             box_width_atr=signal.box.width_atr,
             breakout_price=signal.breakout_price,
             atr=signal.atr,
+            atr_vs_avg=round(atr_vs_avg, 2),
             buy_ratio_at_breakout=volume.buy_ratio_at_breakout,
             buy_ratio_trend=volume.buy_ratio_trend,
             tick_quality=volume.tick_quality.value,
@@ -373,6 +384,26 @@ class InstrumentEngine:
         else:
             return "ASIAN"
 
+    def _update_slow_atr(self, bar: Bar) -> None:
+        """Update slow ATR (1-day period) for regime context."""
+        if self._slow_atr_prev_close > 0:
+            tr = max(
+                bar.high - bar.low,
+                abs(bar.high - self._slow_atr_prev_close),
+                abs(bar.low - self._slow_atr_prev_close),
+            )
+        else:
+            tr = bar.high - bar.low
+
+        self._slow_atr_prev_close = bar.close
+
+        if self._slow_atr_count < self._slow_atr_period:
+            self._slow_atr_count += 1
+            self._slow_atr = self._slow_atr + (tr - self._slow_atr) / self._slow_atr_count
+        else:
+            alpha = 2.0 / (self._slow_atr_period + 1)
+            self._slow_atr = self._slow_atr * (1 - alpha) + tr * alpha
+
     def _check_safety(self) -> Optional[str]:
         """Check daily trade and loss limits."""
         tm = self._trade_manager
@@ -393,6 +424,7 @@ class InstrumentEngine:
         self._detector.add_bar(bar)
         if self._sma_filter is not None:
             self._sma_filter.add_bar(bar)
+        self._update_slow_atr(bar)
         self._bar_count += 1
 
     def get_status(self) -> dict:

@@ -1,8 +1,8 @@
 # V11 Design Document — Darvas Box + Volume Imbalance + LLM Filter
 
-**Last updated:** 2026-04-06 ET (Phase 8: critical fixes + trade execution test coverage)  
-**Status:** Phase 8 complete. Critical safety fixes (daily reset, risk gate, SL failsafe, position reconciliation). 263 total tests. Ready for paper trading on IBKR.  
-**Related docs:** `docs/PROJECT_STATUS.md` | `docs/journal/2026-04-06_phase7_run_live_session.md` | `docs/journal/2026-04-07_orb_adapter_session.md`
+**Last updated:** 2026-04-13 ET (LLM filtering enhancements: expanded history, regime-filtered feedback loop, live auto-assessment)
+**Status:** Phase 15 complete. LLM filtering with regime-filtered feedback loop. Expanded price history (20 daily + 4h bars + trend context). Auto-assessment wired for both replay and live. DeepSeek V3 via OpenRouter.
+**Related docs:** `docs/PROJECT_STATUS.md` | `docs/journal/2026-04-13_llm_filtering_enhancements.md` | `docs/journal/2026-04-13_llm_model_comparison.md`
 
 ---
 
@@ -355,12 +355,47 @@ Beyond basic signal approval, the LLM can provide value in several ways:
 
 **Value:** Cross-instrument confirmation or contradiction.
 
-#### F. Post-Trade Review (Learning Loop)
+#### F. Post-Trade Review (Learning Loop) — ✅ IMPLEMENTED
 
-**How:** After each trade closes, send the result to the LLM:
-- "You approved this long at 2046.10. It hit the stop at 2037.80. Here's what happened in the bars after entry. What went wrong? Should we adjust any filters?"
+**How:** After each trade closes, the auto-assessor grades the LLM decision:
+- CORRECT: approved + profitable, or rejected + would have lost
+- WRONG: approved + unprofitable
+- MISSED: rejected + would have been profitable
 
-**Value:** The LLM doesn't "learn" in the ML sense, but it can generate insights that you (the human) can use to refine parameters or add new filters. This is a **human-in-the-loop learning cycle**, not autonomous adaptation.
+The graded decisions are stored in a `DecisionLedger` (JSON file) and injected into subsequent LLM prompts via a regime-filtered feedback table.
+
+**Regime-filtered feedback**: Instead of showing all past decisions, the feedback table is filtered by volatility regime similarity:
+- ORB: filtered by `atr_regime` (fast ATR / slow ATR, ±0.3 tolerance)
+- Darvas/Retest: filtered by `atr_vs_avg` (current ATR / 1-day avg ATR, ±0.3 tolerance)
+- Falls back to overall track record if <3 regime-matched decisions exist
+
+**Results (XAUUSD replay, Jan-Apr 2026, DeepSeek V3):**
+
+| Version | Trades | PnL | Win Rate | PF | Sharpe |
+|---|---|---|---|---|---|
+| Passthrough (no LLM) | 53 | +$117.18 | 39.6% | 1.22 | 1.14 |
+| LLM only (no feedback) | 47 | +$25.90 | 48.9% | 1.07 | 0.40 |
+| LLM + history + unfiltered feedback | 36 | +$40.50 | 52.8% | 1.16 | 0.90 |
+| **LLM + history + regime-filtered feedback** | **35** | **+$78.04** | **51.4%** | **1.32** | **1.77** |
+
+**Key insight:** Not all past decisions are equally relevant. Showing only decisions from similar volatility conditions makes the calibration signal much more actionable.
+
+**Architecture:**
+```
+Trade exits → _on_fill / on_trade_closed → assess_*_decision()
+                                            → ledger.assess_decision()
+                                            → _save() (persists to JSON)
+                                            → refresh_feedback()
+                                            → next LLM call sees updated regime-filtered table
+```
+
+**Expanded LLM context (ORB):**
+- 20 daily bars (was 10) — 4 weeks of daily OHLC
+- 4-hour bars for last 5 days — session structure (ASIAN/LONDON/NY)
+- Trend context: SMA20 slope, consecutive up/down days, days since high/low, position vs 20d SMA
+- ATR regime: fast ATR / slow ATR ratio
+
+See `docs/journal/2026-04-13_llm_filtering_enhancements.md` for full details.
 
 ---
 

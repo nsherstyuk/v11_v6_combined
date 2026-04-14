@@ -195,6 +195,11 @@ class MultiStrategyRunner:
                 trade_log_dir=trade_log_dir,
                 dry_run=self._live_config.dry_run,
             )
+
+            # Wire auto-assessment callback for Darvas/Retest decisions
+            if self._llm_filter and hasattr(self._llm_filter, '_ledger'):
+                trade_manager.on_trade_closed = self._make_assess_callback(
+                    inst_config.pair_name)
             self._feeds[pair] = InstrumentFeed(
                 inst_config=inst_config,
                 trade_manager=trade_manager,
@@ -301,6 +306,8 @@ class MultiStrategyRunner:
             state_dir=state_dir,
             dry_run=self._live_config.dry_run,
             poll_interval=poll_interval,
+            llm_filter=self._llm_filter,
+            llm_confidence_threshold=self._live_config.llm_confidence_threshold,
         )
 
         feed.add_strategy(adapter)
@@ -341,6 +348,46 @@ class MultiStrategyRunner:
         for feed in self._feeds.values():
             feed.trade_manager.reset_daily()
         self._log.info("RUNNER: Daily reset complete")
+
+    def _make_assess_callback(self, instrument: str):
+        """Create a trade-closed callback for auto-assessing Darvas/Retest decisions."""
+        from ..llm.grok_filter import GrokFilter
+        from ..replay.auto_assessor import assess_darvas_decision
+
+        def on_trade_closed(record):
+            # Find the ledger from the LLM filter
+            ledger = None
+            if isinstance(self._llm_filter, GrokFilter) and self._llm_filter._ledger:
+                ledger = self._llm_filter._ledger
+            elif hasattr(self._llm_filter, '_inner_filter'):
+                inner = self._llm_filter._inner_filter
+                if isinstance(inner, GrokFilter) and inner._ledger:
+                    ledger = inner._ledger
+
+            if ledger is None:
+                return
+
+            assess_darvas_decision(
+                ledger=ledger,
+                instrument=instrument,
+                decision_timestamp=record.exit_time.isoformat() if record.exit_time else "",
+                approved=True,  # trade was approved if it entered
+                entry_price=record.entry_price,
+                exit_price=record.exit_price,
+                exit_reason=record.exit_reason,
+                pnl=record.pnl,
+                breakout_price=record.entry_price,
+            )
+
+            # Refresh feedback table
+            if isinstance(self._llm_filter, GrokFilter):
+                self._llm_filter.refresh_feedback()
+            elif hasattr(self._llm_filter, '_inner_filter'):
+                inner = self._llm_filter._inner_filter
+                if isinstance(inner, GrokFilter):
+                    inner.refresh_feedback()
+
+        return on_trade_closed
 
     def get_all_status(self) -> dict:
         """Comprehensive status across all strategies and instruments."""

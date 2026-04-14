@@ -19,7 +19,8 @@ class ReplayConfig:
     # LLM mode
     llm_mode: str = "passthrough"    # "passthrough" | "live" | "cached"
     grok_api_key: str = ""
-    grok_model: str = "grok-4-1-fast-reasoning"
+    grok_model: str = "deepseek/deepseek-chat-v3-0324"
+    llm_base_url: str = "https://openrouter.ai/api/v1"  # OpenAI-compatible endpoint (xAI, OpenRouter, etc.)
     llm_cache_path: str = "replay_llm_cache.json"
     llm_confidence_threshold: int = 75
 

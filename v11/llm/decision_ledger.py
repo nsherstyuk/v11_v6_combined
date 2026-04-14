@@ -65,6 +65,7 @@ class DecisionRecord:
 
     @classmethod
     def from_dict(cls, d: dict) -> DecisionRecord:
+        d = dict(d)  # shallow copy to avoid mutating input
         outcome_data = d.pop("outcome", {})
         outcome = DecisionOutcome(**outcome_data) if outcome_data else DecisionOutcome()
         return cls(outcome=outcome, **d)
@@ -137,6 +138,12 @@ class DecisionLedger:
         now = timestamp or datetime.now(timezone.utc)
         ts_str = now.strftime("%Y-%m-%d_%H%M%S")
         record_id = f"{ts_str}_{instrument}_{strategy}"
+        # Avoid ID collisions in fast replay (same-second decisions)
+        if record_id in self._records:
+            suffix = 1
+            while f"{record_id}_{suffix}" in self._records:
+                suffix += 1
+            record_id = f"{record_id}_{suffix}"
 
         record = DecisionRecord(
             id=record_id,
@@ -208,6 +215,42 @@ class DecisionLedger:
         records.sort(key=lambda r: r.timestamp_utc, reverse=True)
         return records
 
+    def find_unassessed(self, strategy: str, instrument: str,
+                        **context_filters) -> Optional[DecisionRecord]:
+        """Find the first unassessed decision matching strategy, instrument, and context fields.
+
+        Args:
+            strategy: Strategy name or comma-separated list (e.g. "DARVAS,4H_RETEST")
+            instrument: Instrument name
+            **context_filters: Key-value pairs to match against record.context.
+                Values are compared with tolerance 1e-6 for floats.
+        """
+        strategies = [s.strip() for s in strategy.split(",")]
+        for rec in self._records.values():
+            if rec.strategy not in strategies:
+                continue
+            if rec.instrument != instrument:
+                continue
+            if rec.outcome.assessed:
+                continue
+            # Check context filters
+            match = True
+            for key, value in context_filters.items():
+                ctx_val = rec.context.get(key)
+                if ctx_val is None:
+                    match = False
+                    break
+                if isinstance(value, float) and isinstance(ctx_val, (int, float)):
+                    if abs(ctx_val - value) > 1e-6:
+                        match = False
+                        break
+                elif ctx_val != value:
+                    match = False
+                    break
+            if match:
+                return rec
+        return None
+
     def build_feedback_table(self, max_rows: int = 20) -> str:
         """Build a markdown table of recent assessed decisions for Grok context.
 
@@ -254,6 +297,138 @@ class DecisionLedger:
             "If you've been wrong on similar setups, be more conservative. "
             "If you've been rejecting setups that would have been profitable, "
             "consider being less conservative."
+        )
+
+        return "\n".join(lines)
+
+    def build_regime_filtered_table(
+        self,
+        strategy: str,
+        regime_key: str,
+        regime_value: float,
+        regime_tolerance: float = 0.3,
+        max_rows: int = 15,
+        fallback_rows: int = 5,
+    ) -> str:
+        """Build feedback table filtered by similar volatility regime.
+
+        Shows decisions from the same strategy where the regime metric
+        (atr_regime for ORB, atr_vs_avg for Darvas) is within tolerance.
+        Falls back to most recent decisions if too few regime-matched ones exist.
+
+        Args:
+            strategy: "ORB", "DARVAS", or "4H_RETEST"
+            regime_key: context field name (e.g. "atr_regime" or "atr_vs_avg")
+            regime_value: current regime value to match against
+            regime_tolerance: how close a past regime must be (±)
+            max_rows: max rows in the regime-matched section
+            fallback_rows: rows from general history if regime matches < 3
+        """
+        assessed = self.get_assessed()
+        if not assessed:
+            return ""
+
+        # Filter by strategy + regime similarity
+        regime_matched = []
+        for r in assessed:
+            if r.strategy != strategy:
+                continue
+            past_regime = r.context.get(regime_key, None)
+            if past_regime is not None and abs(past_regime - regime_value) <= regime_tolerance:
+                regime_matched.append(r)
+
+        # Stats for regime-matched decisions
+        regime_total = len(regime_matched)
+        regime_correct = sum(1 for r in regime_matched if r.outcome.grade == "CORRECT")
+        regime_wrong = sum(1 for r in regime_matched if r.outcome.grade == "WRONG")
+        regime_missed = sum(1 for r in regime_matched if r.outcome.grade == "MISSED")
+        regime_accuracy = regime_correct / regime_total * 100 if regime_total > 0 else 0
+
+        lines = []
+
+        # ── Regime-matched section ──
+        if regime_total > 0:
+            lines.append(
+                f"## Decisions in Similar Regime "
+                f"({regime_key}={regime_value:.2f} ±{regime_tolerance}, "
+                f"{regime_total} matches, {regime_accuracy:.0f}% accuracy)"
+            )
+            lines.append(
+                f"Correct: {regime_correct} | Wrong: {regime_wrong} | "
+                f"Missed: {regime_missed}"
+            )
+            lines.append("")
+            lines.append(
+                "| Date | Instrument | Decision | Conf | "
+                f"{regime_key} | Outcome | Grade |"
+            )
+            lines.append(
+                "|------|------------|----------|------|"
+                f"---------|---------|-------|"
+            )
+            for r in regime_matched[:max_rows]:
+                date = r.timestamp_utc[:10]
+                past_regime = r.context.get(regime_key, 0)
+                outcome_short = r.outcome.what_happened[:50]
+                grade_icon = {
+                    "CORRECT": "✓",
+                    "WRONG": "✗",
+                    "MISSED": "⚠",
+                }.get(r.outcome.grade, "?")
+                lines.append(
+                    f"| {date} | {r.instrument} | {r.decision} | "
+                    f"{r.confidence} | {past_regime:.2f} | "
+                    f"{outcome_short} | {grade_icon} {r.outcome.grade} |"
+                )
+        else:
+            lines.append(
+                f"## No prior decisions in similar regime "
+                f"({regime_key}={regime_value:.2f} ±{regime_tolerance})"
+            )
+
+        # ── Fallback: general recent history if few regime matches ──
+        if regime_total < 3:
+            # Overall stats
+            total = len(assessed)
+            correct = sum(1 for r in assessed if r.outcome.grade == "CORRECT")
+            wrong = sum(1 for r in assessed if r.outcome.grade == "WRONG")
+            missed = sum(1 for r in assessed if r.outcome.grade == "MISSED")
+            accuracy = correct / total * 100 if total > 0 else 0
+
+            lines.append("")
+            lines.append(
+                f"## Overall Track Record ({total} assessed, {accuracy:.0f}% accuracy)"
+            )
+            lines.append(
+                f"Correct: {correct} | Wrong: {wrong} | Missed: {missed}"
+            )
+            lines.append("")
+            lines.append(
+                "| Date | Strategy | Instrument | Decision | Conf | Outcome | Grade |"
+            )
+            lines.append(
+                "|------|----------|------------|----------|------|---------|-------|"
+            )
+            for r in assessed[:fallback_rows]:
+                date = r.timestamp_utc[:10]
+                outcome_short = r.outcome.what_happened[:50]
+                grade_icon = {
+                    "CORRECT": "✓",
+                    "WRONG": "✗",
+                    "MISSED": "⚠",
+                }.get(r.outcome.grade, "?")
+                lines.append(
+                    f"| {date} | {r.strategy} | {r.instrument} | "
+                    f"{r.decision} | {r.confidence} | "
+                    f"{outcome_short} | {grade_icon} {r.outcome.grade} |"
+                )
+
+        lines.append("")
+        lines.append(
+            "Pay special attention to decisions in similar regime conditions — "
+            "they are the most relevant to your current decision. "
+            "If you've been wrong in this regime before, be more cautious. "
+            "If you've been missing profitable setups in this regime, be less conservative."
         )
 
         return "\n".join(lines)

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .models import SignalContext
+from .models import SignalContext, ORBSignalContext
 from ..core.types import FilterDecision
 
 
@@ -30,9 +30,17 @@ class LLMFilter(Protocol):
     """
 
     async def evaluate_signal(self, context: SignalContext) -> FilterDecision:
-        """Evaluate a breakout signal and return an approval decision.
+        """Evaluate a Darvas/Retest breakout signal.
 
         Must never raise — on failure, return FilterDecision(approved=False, ...).
         Must log every request/response pair.
+        """
+        ...
+
+    async def evaluate_orb_signal(self, context: ORBSignalContext) -> FilterDecision:
+        """Evaluate an ORB setup signal.
+
+        Must never raise — on failure, return FilterDecision(approved=True, ...)
+        (ORB falls back to mechanical approval).
         """
         ...

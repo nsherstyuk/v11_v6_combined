@@ -74,3 +74,17 @@ class PassthroughFilter:
             target_price=tp,
             reasoning="Mechanical approval — LLM filter disabled",
         )
+
+    async def evaluate_orb_signal(self, context) -> FilterDecision:
+        """Auto-approve ORB signals -- LLM filter disabled."""
+        log.info(
+            f"Passthrough: AUTO-APPROVE ORB {context.instrument} "
+            f"range={context.range_low:.2f}-{context.range_high:.2f}")
+        return FilterDecision(
+            approved=True,
+            confidence=100,
+            entry_price=0.0,
+            stop_price=0.0,
+            target_price=0.0,
+            reasoning="Mechanical approval -- LLM filter disabled",
+        )

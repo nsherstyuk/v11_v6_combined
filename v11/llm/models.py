@@ -44,6 +44,7 @@ class SignalContext(BaseModel):
     box_width_atr: float
     breakout_price: float
     atr: float
+    atr_vs_avg: float = 1.0              # current ATR / 20-day average ATR (>1.5 = elevated, <0.5 = depressed)
 
     # Volume analysis
     buy_ratio_at_breakout: float
@@ -98,6 +99,26 @@ class DailyBarData(BaseModel):
     c: float        # close
 
 
+class HourlyBarData(BaseModel):
+    """Compact 4-hour bar for ORB LLM context."""
+    date: str       # YYYY-MM-DD
+    session: str    # e.g. "00-04", "04-08", "08-12", "12-16", "16-20", "20-24"
+    o: float        # open
+    h: float        # high
+    l: float        # low
+    c: float        # close
+
+
+class TrendContext(BaseModel):
+    """Derived trend features for LLM context."""
+    sma20_slope: float = 0.0       # 20-day SMA daily change (positive = rising)
+    consecutive_up_days: int = 0   # consecutive days with close > open
+    consecutive_down_days: int = 0 # consecutive days with close < open
+    days_since_high: int = 0      # days since 20-day high
+    days_since_low: int = 0       # days since 20-day low
+    position_vs_20d_sma: str = "neutral"  # "above", "below", "neutral"
+
+
 class ORBSignalContext(BaseModel):
     """Everything the LLM receives when ORB is in RANGE_READY.
 
@@ -113,6 +134,7 @@ class ORBSignalContext(BaseModel):
     range_size: float               # absolute (e.g. $48.16)
     range_size_pct: float           # as % of midpoint (e.g. 1.05)
     range_vs_avg: float             # ratio vs 10-day average range
+    atr_regime: float = 1.0         # current ATR / 20-day average ATR (>1.5 = elevated, <0.5 = depressed)
 
     # Current price
     current_price: float
@@ -126,4 +148,6 @@ class ORBSignalContext(BaseModel):
 
     # Bar context
     recent_bars: List[BarData]      # last 360 1-min bars (6 hours)
-    daily_bars: List[DailyBarData]  # last 10 daily bars
+    daily_bars: List[DailyBarData] # last 20 daily bars
+    hourly_bars: List[HourlyBarData] = []  # 4-hour bars for last 5 days
+    trend_context: Optional[TrendContext] = None  # derived trend features

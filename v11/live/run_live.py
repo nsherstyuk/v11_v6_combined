@@ -179,7 +179,7 @@ class V11LiveTrader:
         # LLM filter (shared)
         if use_llm:
             load_dotenv(ROOT / ".env")
-            api_key = os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY", "")
+            api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY", "")
             if not api_key:
                 raise ValueError(
                     "No API key found. Set XAI_API_KEY or GROK_API_KEY in .env")
@@ -187,6 +187,7 @@ class V11LiveTrader:
             self.llm_filter = GrokFilter(
                 api_key=api_key,
                 model=live_cfg.llm_model,
+                base_url=live_cfg.llm_base_url,
                 timeout=live_cfg.llm_timeout_seconds,
                 log_dir=str(grok_log_dir),
             )
@@ -275,7 +276,7 @@ class V11LiveTrader:
             if pair == "XAUUSD":
                 self.log.info(f"Fetching daily bars for {pair} (ORB context)...")
                 df = self.conn.fetch_historical_bars(
-                    pair, duration="15 D", bar_size="1 day")
+                    pair, duration="20 D", bar_size="1 day")
                 if not df.empty:
                     from v11.llm.models import DailyBarData
                     daily_bars = []
@@ -290,6 +291,36 @@ class V11LiveTrader:
                             engine._daily_bars = daily_bars
                             self.log.info(
                                 f"{pair}: Loaded {len(daily_bars)} daily bars for ORB LLM")
+
+                # Fetch 4-hour bars for last 5 days
+                self.log.info(f"Fetching 4-hour bars for {pair} (ORB context)...")
+                df_4h = self.conn.fetch_historical_bars(
+                    pair, duration="5 D", bar_size="4 hours")
+                if not df_4h.empty:
+                    from v11.llm.models import HourlyBarData
+                    hourly_bars = []
+                    for _, row in df_4h.iterrows():
+                        date_str = str(row['date'])
+                        # Extract hour from datetime string (e.g. "2026-04-07 08:00:00")
+                        hour = 0
+                        if ' ' in date_str:
+                            try:
+                                hour = int(date_str.split(' ')[1].split(':')[0])
+                            except (ValueError, IndexError):
+                                pass
+                        # Session format: "00-04", "04-08", etc.
+                        session = f"{(hour // 4) * 4:02d}-{((hour // 4) + 1) * 4:02d}"
+                        hourly_bars.append(HourlyBarData(
+                            date=date_str[:10],
+                            o=row['open'], h=row['high'],
+                            l=row['low'], c=row['close'],
+                            session=session,
+                        ))
+                    for engine in self.runner.engines:
+                        if hasattr(engine, '_hourly_bars') and engine.pair_name == pair:
+                            engine._hourly_bars = hourly_bars
+                            self.log.info(
+                                f"{pair}: Loaded {len(hourly_bars)} 4-hour bars for ORB LLM")
 
     def run(self) -> None:
         """Main trading loop."""

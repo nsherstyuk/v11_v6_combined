@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from ..core.types import Bar
+from ..core.types import Bar, ExitReason
 from ..config.strategy_config import StrategyConfig, EURUSD_CONFIG, USDJPY_CONFIG, XAUUSD_CONFIG
 from ..config.live_config import (
     LiveConfig, InstrumentConfig,
@@ -23,6 +23,8 @@ from ..live.live_engine import InstrumentEngine
 from ..live.level_retest_engine import LevelRetestEngine
 from ..live.risk_manager import RiskManager
 from ..llm.passthrough_filter import PassthroughFilter
+from .replay_orb import ReplayORBAdapter
+from .auto_assessor import assess_orb_decision, assess_darvas_decision
 
 from .config import ReplayConfig
 from .stub_connection import StubIBKRConnection
@@ -100,6 +102,9 @@ class ReplayRunner:
         if self._config.llm_mode == "passthrough":
             return PassthroughFilter()
 
+        # LLM log dir for decision ledger (feedback loop)
+        llm_log_dir = str(self._output_dir / "grok_logs")
+
         if self._config.llm_mode == "cached":
             inner = None
             if self._config.grok_api_key:
@@ -107,6 +112,8 @@ class ReplayRunner:
                 inner = GrokFilter(
                     api_key=self._config.grok_api_key,
                     model=self._config.grok_model,
+                    base_url=self._config.llm_base_url,
+                    log_dir=llm_log_dir,
                 )
             return CachedFilter(
                 inner_filter=inner,
@@ -118,12 +125,14 @@ class ReplayRunner:
             return GrokFilter(
                 api_key=self._config.grok_api_key,
                 model=self._config.grok_model,
+                base_url=self._config.llm_base_url,
+                log_dir=llm_log_dir,
             )
 
         return PassthroughFilter()
 
     def _build_engines(self, instrument: str) -> List:
-        """Create Darvas + LevelRetest engines for one instrument."""
+        """Create Darvas + LevelRetest + ORB engines for one instrument."""
         strategy_config = STRATEGY_CONFIGS.get(instrument)
         inst_config = INSTRUMENT_CONFIGS.get(instrument)
         if strategy_config is None or inst_config is None:
@@ -159,7 +168,27 @@ class ReplayRunner:
         )
         retest._risk_check = self._risk_manager.can_trade
 
-        return [darvas, retest]
+        engines = [darvas, retest]
+
+        # Add ORB engine for XAUUSD
+        if instrument == "XAUUSD":
+            from ..v6_orb.config import StrategyConfig as V6StrategyConfig
+            v6_config = V6StrategyConfig(
+                instrument="XAUUSD",
+                velocity_filter_enabled=False,  # 1-min bars can't produce tick velocity
+                max_pending_hours=8,            # Allow more time for breakout to trigger
+                trade_end_hour=20,             # XAUUSD trades nearly 24h, extend window
+            )
+            orb = ReplayORBAdapter(
+                v6_config=v6_config,
+                llm_filter=self._llm_filter,
+                llm_confidence_threshold=self._config.llm_confidence_threshold,
+                live_config=self._live_config,
+                log=log,
+            )
+            engines.append(orb)
+
+        return engines
 
     async def run(self, bars_by_instrument: Dict[str, List[Bar]]) -> dict:
         """Run the full replay.
@@ -220,10 +249,10 @@ class ReplayRunner:
                         timestamp=bar.timestamp.isoformat(), data={},
                     )
 
-                    # Force-close any open trade on date boundary
+                    # Force-close any open trade on date boundary (Darvas/Retest)
                     if tm.in_trade:
                         record = tm.force_close(
-                            bar.close, "DAILY_RESET", tm.entry_bar_index)
+                            bar.close, ExitReason.DAILY_RESET, tm.entry_bar_index)
                         if record:
                             self._event_logger.emit(
                                 "TRADE_EXITED", strategy="ALL",
@@ -238,6 +267,25 @@ class ReplayRunner:
                                     "llm_confidence": 0,
                                 },
                             )
+
+                    # Force-close any open ORB trade on date boundary
+                    for engine in engines:
+                        if isinstance(engine, ReplayORBAdapter) and engine.in_trade:
+                            orb_record = engine.force_close(bar.close, "DAILY_RESET")
+                            if orb_record:
+                                self._event_logger.emit(
+                                    "TRADE_EXITED", strategy="V6_ORB",
+                                    instrument=instrument,
+                                    timestamp=bar.timestamp.isoformat(),
+                                    data={
+                                        "instrument": instrument,
+                                        "strategy": "V6_ORB",
+                                        "pnl": orb_record["pnl"],
+                                        "exit_reason": "DAILY_RESET",
+                                        "hold_bars": 0,
+                                        "llm_confidence": 0,
+                                    },
+                                )
 
                 # Session gap detection (>30 min gap between bars)
                 if i > 0:
@@ -259,10 +307,24 @@ class ReplayRunner:
 
                 # Process the bar through all engines
                 for engine in engines:
+                    if isinstance(engine, ReplayORBAdapter):
+                        # ORB adapter manages its own trades
+                        was_in_trade = engine.in_trade
+                        orb_trades_before = len(engine._trade_records)
+                        await engine.on_bar(bar)
+
+                        # Auto-assess ORB decisions after trade exits
+                        if len(engine._trade_records) > orb_trades_before:
+                            rec = engine._trade_records[-1]
+                            self._assess_orb_trade(
+                                instrument, engine, rec, bar_date)
+                        continue
+
                     tm = self._trade_managers[instrument]
                     was_in_trade = tm.in_trade
                     pnl_before = tm.daily_pnl
                     trades_before = tm.daily_trades
+                    saved_entry_price = tm.signal_entry_price  # save before on_bar resets it
 
                     await engine.on_bar(bar)
 
@@ -298,6 +360,11 @@ class ReplayRunner:
                             },
                         )
 
+                        # Auto-assess Darvas/Retest decisions
+                        self._assess_darvas_trade(
+                            instrument, engine, pnl_delta, bar_date,
+                            breakout_price=saved_entry_price)
+
                 # Progress logging every 10000 bars
                 if (i + 1) % 10000 == 0:
                     log.info(f"Replay {instrument}: {i + 1}/{len(replay_bars)} bars")
@@ -311,6 +378,23 @@ class ReplayRunner:
         # Compute metrics from trade records
         result["event_counts"] = self._event_logger.get_counts()
         result["trade_records"] = self._event_logger.trade_records
+
+        # Merge ORB trade records into event logger's trade records
+        for instrument, engines in self._engines.items():
+            for engine in engines:
+                if isinstance(engine, ReplayORBAdapter):
+                    for rec in engine._trade_records:
+                        self._event_logger.trade_records.append({
+                            "instrument": instrument,
+                            "strategy": "V6_ORB",
+                            "direction": rec.get("direction", "?"),
+                            "entry_price": rec.get("entry_price", 0),
+                            "exit_price": rec.get("exit_price", 0),
+                            "pnl": rec.get("pnl", 0),
+                            "exit_reason": rec.get("exit_reason", "?"),
+                            "timestamp": rec.get("timestamp", ""),
+                        })
+
         result["metrics"] = compute_metrics(self._event_logger.trade_records)
 
         # Write summary
@@ -318,6 +402,82 @@ class ReplayRunner:
         self._event_logger.close()
 
         return result
+
+    def _assess_orb_trade(self, instrument: str, engine: ReplayORBAdapter,
+                          rec: dict, bar_date: str) -> None:
+        """Assess ORB LLM decision after trade completes."""
+        from ..llm.grok_filter import GrokFilter
+
+        # Get the ledger from the LLM filter
+        ledger = None
+        if isinstance(self._llm_filter, GrokFilter) and self._llm_filter._ledger:
+            ledger = self._llm_filter._ledger
+        elif isinstance(self._llm_filter, CachedFilter):
+            inner = getattr(self._llm_filter, '_inner_filter', None)
+            if isinstance(inner, GrokFilter) and inner._ledger:
+                ledger = inner._ledger
+
+        if ledger is None:
+            return
+
+        assess_orb_decision(
+            ledger=ledger,
+            instrument=instrument,
+            decision_date=bar_date,
+            approved=engine._llm_approved_today,
+            entry_price=rec.get("entry_price", 0),
+            exit_price=rec.get("exit_price", 0),
+            exit_reason=rec.get("exit_reason", "?"),
+            pnl=rec.get("pnl", 0),
+            range_high=rec.get("range_high", 0),
+            range_low=rec.get("range_low", 0),
+        )
+
+        # Refresh feedback table so next LLM call sees updated history
+        self._refresh_feedback()
+
+    def _assess_darvas_trade(self, instrument: str, engine,
+                             pnl_delta: float, bar_date: str,
+                             breakout_price: float = 0.0) -> None:
+        """Assess Darvas/Retest LLM decision after trade completes."""
+        from ..llm.grok_filter import GrokFilter
+
+        ledger = None
+        if isinstance(self._llm_filter, GrokFilter) and self._llm_filter._ledger:
+            ledger = self._llm_filter._ledger
+        elif isinstance(self._llm_filter, CachedFilter):
+            inner = getattr(self._llm_filter, '_inner_filter', None)
+            if isinstance(inner, GrokFilter) and inner._ledger:
+                ledger = inner._ledger
+
+        if ledger is None:
+            return
+
+        tm = self._trade_managers[instrument]
+        assess_darvas_decision(
+            ledger=ledger,
+            instrument=instrument,
+            decision_timestamp=bar_date,
+            approved=True,  # if we got here, the trade was approved
+            entry_price=tm.signal_entry_price if tm.signal_entry_price else 0,
+            exit_price=0,
+            exit_reason="check_exit",
+            pnl=pnl_delta,
+            breakout_price=breakout_price,
+        )
+
+        self._refresh_feedback()
+
+    def _refresh_feedback(self) -> None:
+        """Refresh LLM feedback table from decision ledger."""
+        from ..llm.grok_filter import GrokFilter
+
+        if isinstance(self._llm_filter, GrokFilter):
+            self._llm_filter.refresh_feedback()
+        elif isinstance(self._llm_filter, CachedFilter):
+            inner = getattr(self._llm_filter, '_inner_filter', None)
+            if isinstance(inner, GrokFilter):
+                inner.refresh_feedback()
 
     def _write_summary(self, result: dict) -> None:
         """Write human-readable summary file."""

@@ -90,7 +90,8 @@ class LiveConfig:
     bar_seconds: int = 60           # bar aggregation period
 
     # LLM filter settings
-    llm_model: str = "grok-4-1-fast-reasoning"
+    llm_model: str = "deepseek/deepseek-chat-v3-0324"
+    llm_base_url: str = "https://openrouter.ai/api/v1"  # OpenAI-compatible endpoint (xAI, OpenRouter, etc.)
     llm_confidence_threshold: int = 75      # minimum confidence to approve trade
     llm_timeout_seconds: float = 10.0       # max wait for LLM response
     llm_bars_context: int = 200             # 1-min bars to send to LLM

@@ -9,7 +9,7 @@ Design (V11_DESIGN.md §11, Phase 5):
        for velocity calculation and price buffering.
     2. on_price() throttles to V6's poll interval (2s) and drives
        strategy.on_tick() + execution.check_fills().
-    3. on_bar() is a no-op — V6 doesn't use bars.
+    3. on_bar() evaluates the LLM gate when pending (async context needed).
     4. Fill callbacks report to V11's RiskManager.
     5. Daily orchestration (range calc, gap injection) replaces what
        V6's LiveRunner normally does.
@@ -33,6 +33,7 @@ from ..v6_orb.market_event import Tick, Fill
 from ..v6_orb.live_context import LiveMarketContext
 from ..v6_orb.ibkr_executor import IBKRExecutionEngine
 from .risk_manager import RiskManager
+from ..llm.models import TrendContext
 
 
 class ORBAdapter:
@@ -113,9 +114,16 @@ class ORBAdapter:
         self._llm_filter = llm_filter
         self._llm_confidence_threshold = llm_confidence_threshold
         self._daily_bars: list = []
+        self._hourly_bars: list = []  # 4-hour bars for last 5 days (set by run_live)
         self._llm_evaluated_today: bool = False
         self._llm_gate_pending: bool = False
         self._llm_gate_time: Optional[datetime] = None
+
+        # ── Slow ATR for regime context ────────────────────────────
+        self._slow_atr: float = 0.0
+        self._slow_atr_count: int = 0
+        self._slow_atr_prev_close: float = 0.0
+        self._slow_atr_period: int = 1440  # 1 day of 1-min bars
 
         # ── Adapter state ─────────────────────────────────────────
         self._last_poll_time: Optional[datetime] = None
@@ -141,16 +149,15 @@ class ORBAdapter:
     def strategy_name(self) -> str:
         return self.STRATEGY_NAME
 
-    async def on_bar(self, bar) -> None:
-        """No-op. V6 is tick-driven, not bar-driven."""
-        pass
-
     def on_price(self, price: float, now: datetime) -> None:
         """Drive the V6 strategy from V11's price tick stream.
 
         Called on every XAUUSD tick from the shared IBKR connection.
         Throttles to poll_interval (default 2s) to match V6's rhythm.
         """
+        # ── Update slow ATR from tick ──────────────────────────────
+        self._update_slow_atr_tick(price)
+
         # ── Daily reset ───────────────────────────────────────────
         today_str = now.strftime("%Y-%m-%d")
         if today_str != self._current_date:
@@ -298,6 +305,9 @@ class ORBAdapter:
                 f"ORB EXIT: {fill.reason} @ {fill.price} "
                 f"PnL=${pnl_usd:+.2f} → risk manager notified")
 
+            # Auto-assess ORB decision
+            self._assess_exit(fill, pnl_usd)
+
     def _calc_pnl(self, exit_price: float) -> float:
         """Raw price-unit PnL (not USD)."""
         s = self._strategy
@@ -306,6 +316,41 @@ class ORBAdapter:
         elif s.direction == "SHORT":
             return s.entry_price - exit_price
         return 0.0
+
+    def _assess_exit(self, fill: Fill, pnl_usd: float) -> None:
+        """Auto-assess the LLM decision after an ORB trade exits."""
+        if not self._llm_filter:
+            return
+
+        from ..llm.grok_filter import GrokFilter
+        ledger = None
+        if isinstance(self._llm_filter, GrokFilter) and self._llm_filter._ledger:
+            ledger = self._llm_filter._ledger
+
+        if ledger is None:
+            return
+
+        rng = self._strategy.range
+        range_high = rng.high if rng else 0
+        range_low = rng.low if rng else 0
+
+        from ..replay.auto_assessor import assess_orb_decision
+        assess_orb_decision(
+            ledger=ledger,
+            instrument=self._instrument,
+            decision_date=fill.timestamp.strftime("%Y-%m-%d") if fill.timestamp else "",
+            approved=self._llm_evaluated_today,  # True = LLM allowed brackets
+            entry_price=self._strategy.entry_price,
+            exit_price=fill.price,
+            exit_reason=fill.reason,
+            pnl=pnl_usd,
+            range_high=range_high,
+            range_low=range_low,
+        )
+
+        # Refresh feedback table for next LLM call
+        if isinstance(self._llm_filter, GrokFilter):
+            self._llm_filter.refresh_feedback()
 
     # ── LLM gate ──────────────────────────────────────────────────
 
@@ -318,13 +363,13 @@ class ORBAdapter:
             return True
 
         if not hasattr(self._llm_filter, 'evaluate_orb_signal'):
-            return True
+            return True  # Legacy filters without ORB support
 
         rng = self._strategy.range
         if rng is None:
             return True
 
-        from ..llm.models import ORBSignalContext, DailyBarData
+        from ..llm.models import ORBSignalContext, DailyBarData, TrendContext
 
         mid = (rng.high + rng.low) / 2
         size = rng.high - rng.low
@@ -354,6 +399,17 @@ class ORBAdapter:
         else:
             session = "NY"
 
+        # ATR regime: use slow ATR if available, else rough proxy
+        if self._slow_atr > 0:
+            # Fast ATR proxy: recent range / slow_atr
+            fast_atr_proxy = size  # range size as proxy for fast ATR
+            atr_regime = fast_atr_proxy / self._slow_atr if self._slow_atr > 0 else 1.0
+        else:
+            atr_regime = 1.0
+
+        # Compute trend context from daily bars
+        trend_context = self._compute_trend_context(price)
+
         context = ORBSignalContext(
             instrument=self._instrument,
             range_high=rng.high,
@@ -361,6 +417,7 @@ class ORBAdapter:
             range_size=round(size, 2),
             range_size_pct=round(size_pct, 3),
             range_vs_avg=round(range_vs_avg, 2),
+            atr_regime=round(atr_regime, 2),
             current_price=price,
             distance_from_high=round(price - rng.high, 2),
             distance_from_low=round(price - rng.low, 2),
@@ -369,6 +426,8 @@ class ORBAdapter:
             current_time_utc=now.isoformat(),
             recent_bars=[],
             daily_bars=list(self._daily_bars),
+            hourly_bars=list(self._hourly_bars),
+            trend_context=trend_context,
         )
 
         self._log.info(
@@ -400,6 +459,73 @@ class ORBAdapter:
             f"ORB LLM APPROVED: conf={decision.confidence} "
             f"reason={decision.reasoning[:100]}")
         return True
+
+    def _compute_trend_context(self, current_price: float) -> Optional[TrendContext]:
+        """Compute trend context from daily bars for LLM."""
+        if len(self._daily_bars) < 5:
+            return None
+
+        bars = self._daily_bars
+        closes = [b.c for b in bars]
+
+        # SMA20 (or whatever we have)
+        sma_period = min(20, len(closes))
+        sma = sum(closes[-sma_period:]) / sma_period
+
+        # SMA slope: compare SMA to SMA 3 bars ago
+        if len(closes) >= sma_period + 3:
+            sma_prev = sum(closes[-sma_period - 3:-3]) / sma_period
+            sma_slope = (sma - sma_prev) / sma_prev * 100 if sma_prev > 0 else 0.0
+        else:
+            sma_slope = 0.0
+
+        # Consecutive up/down days
+        consecutive_up = 0
+        consecutive_down = 0
+        for i in range(len(closes) - 1, 0, -1):
+            if closes[i] > closes[i - 1]:
+                consecutive_up += 1
+            else:
+                break
+        for i in range(len(closes) - 1, 0, -1):
+            if closes[i] < closes[i - 1]:
+                consecutive_down += 1
+            else:
+                break
+
+        # Days since 20-day high/low
+        highs = [b.h for b in bars[-sma_period:]]
+        lows = [b.l for b in bars[-sma_period:]]
+        max_high = max(highs)
+        min_low = min(lows)
+        days_since_high = 0
+        days_since_low = 0
+        for i in range(len(highs) - 1, -1, -1):
+            if highs[i] >= max_high - 0.01:
+                break
+            days_since_high += 1
+        for i in range(len(lows) - 1, -1, -1):
+            if lows[i] <= min_low + 0.01:
+                break
+            days_since_low += 1
+
+        # Position vs SMA (string label: "above", "below", "neutral")
+        position_vs_sma = ((current_price - sma) / sma * 100) if sma > 0 else 0.0
+        if position_vs_sma > 0.1:
+            position_label = "above"
+        elif position_vs_sma < -0.1:
+            position_label = "below"
+        else:
+            position_label = "neutral"
+
+        return TrendContext(
+            sma20_slope=round(sma_slope, 4),
+            consecutive_up_days=consecutive_up,
+            consecutive_down_days=consecutive_down,
+            days_since_high=days_since_high,
+            days_since_low=days_since_low,
+            position_vs_20d_sma=position_label,
+        )
 
     # ── Daily orchestration ───────────────────────────────────────
 
@@ -483,3 +609,28 @@ class ORBAdapter:
         if self._execution.has_position():
             self._execution.close_at_market()
         self._context.disconnect()
+
+    # ── Slow ATR ──────────────────────────────────────────────────
+
+    def _update_slow_atr_tick(self, price: float) -> None:
+        """Update slow ATR from tick prices (approximation).
+
+        Uses price movement as a proxy for true range since we don't
+        have bar OHLC in the tick-driven adapter. This is an approximation
+        but sufficient for regime context (elevated vs normal vs depressed).
+        """
+        if self._slow_atr_prev_close > 0:
+            # Approximate true range as absolute price change
+            tr = abs(price - self._slow_atr_prev_close)
+        else:
+            tr = 0.0
+
+        self._slow_atr_prev_close = price
+
+        if tr > 0:
+            if self._slow_atr_count < self._slow_atr_period:
+                self._slow_atr_count += 1
+                self._slow_atr = self._slow_atr + (tr - self._slow_atr) / self._slow_atr_count
+            else:
+                alpha = 2.0 / (self._slow_atr_period + 1)
+                self._slow_atr = self._slow_atr * (1 - alpha) + tr * alpha

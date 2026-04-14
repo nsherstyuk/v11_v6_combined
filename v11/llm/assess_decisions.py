@@ -105,15 +105,21 @@ def assess_orb_decision(
                 short_triggered = True
 
         if long_triggered and not long_hit_tp and not long_hit_sl:
-            if h >= long_tp:
+            if l <= long_sl and h >= long_tp:
+                # Both hit on same bar — conservatively assume SL hit first
+                long_hit_sl = True
+            elif h >= long_tp:
                 long_hit_tp = True
-            if l <= long_sl:
+            elif l <= long_sl:
                 long_hit_sl = True
 
         if short_triggered and not short_hit_tp and not short_hit_sl:
-            if l <= short_tp:
+            if h >= short_sl and l <= short_tp:
+                # Both hit on same bar — conservatively assume SL hit first
+                short_hit_sl = True
+            elif l <= short_tp:
                 short_hit_tp = True
-            if h >= short_sl:
+            elif h >= short_sl:
                 short_hit_sl = True
 
     # Determine outcome
@@ -146,13 +152,12 @@ def assess_orb_decision(
     is_approve = record.decision == "APPROVE"
 
     if not breakout_triggered:
-        what = f"No breakout. Range held [{range_low:.2f}-{range_high:.2f}]"
-        grade = "CORRECT" if not is_approve else "WRONG"
         if is_approve:
-            what = f"APPROVED but no breakout occurred. Range held."
             grade = "WRONG"
+            what = f"APPROVED but no breakout occurred. Range held."
         else:
             grade = "CORRECT"
+            what = f"No breakout. Range held [{range_low:.2f}-{range_high:.2f}]"
         return (grade, what, False, False, False, 0.0)
 
     direction = "LONG" if long_triggered else "SHORT"

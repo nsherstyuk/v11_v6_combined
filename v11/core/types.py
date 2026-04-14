@@ -41,6 +41,7 @@ class ExitReason(str, Enum):
     SAFETY_LIMIT = "SAFETY_LIMIT"
     SHUTDOWN = "SHUTDOWN"
     MANUAL = "MANUAL"
+    DAILY_RESET = "DAILY_RESET"
 
 
 class TickQuality(str, Enum):

@@ -1,7 +1,7 @@
 # Project Status — All Trading Systems
 
-**Last updated:** 2026-04-08 ET (Grok LLM gate fixes + diagnostic logging + 5D historical seed)  
-**Author:** Cascade (AI pair programmer)
+**Last updated:** 2026-04-12 ET (Code review fixes: 2 critical crash bugs, 4 important issues, 7 suggestions, 20 new tests)  
+**Author:** Claude Opus 4.6 (AI pair programmer)
 
 ---
 
@@ -33,6 +33,9 @@ docs/
     └── 2026-04-06_live_launch_session.md ← Live launch: Py3.14 fix, LLM bypass, status fix
     └── 2026-04-07_orb_llm_gate_session.md ← ORB LLM gate design + DIVERGENT volume gate
     └── 2026-04-08_diagnostic_session.md ← Grok fixes (3 bugs), diagnostic logging, 5D seed
+    └── 2026-04-13_llm_model_comparison.md ← LLM model comparison (5 models), DeepSeek V3 winner, OpenRouter support
+    └── 2026-04-13_llm_filtering_enhancements.md ← LLM filtering: expanded history, regime-filtered feedback, auto-assessment
+    └── 2026-04-12_code_review_fixes_session.md ← Code review: 2 critical bugs, 4 important fixes, 20 new tests
     └── ...future sessions...
 ```
 
@@ -144,8 +147,19 @@ utils/logger.py  — Rotating file + console logger
 ## Project 3: V11 (Multi-Strategy Portfolio — Build Phase)
 
 **Location:** `C:\ibkr_grok-_wing_agent\v11\`  
-**Status:** ✅ **LIVE on paper account** (port 4002). Three strategies across two instruments: EURUSD Darvas+SMA (~15/yr), EURUSD 4H Level Retest (~22/yr), XAUUSD ORB (from v6, ~150/yr). Combined ~187 trades/yr. Mechanical signals only (LLM bypass via --no-llm). Python 3.14 compatibility patched.  
+**Status:** ✅ **LIVE on paper account** (port 4002). Three strategies across two instruments: EURUSD Darvas+SMA (~15/yr), EURUSD 4H Level Retest (~22/yr), XAUUSD ORB (from v6, ~150/yr). Combined ~187 trades/yr. LLM filtering with DeepSeek V3 + regime-filtered feedback loop. Python 3.14 compatibility patched.
 **Purpose:** Multi-strategy portfolio combining rule-based breakouts + volume imbalance + optional Grok LLM filter for FX/commodities.
+
+### LLM Filtering Results (XAUUSD Replay, Jan-Apr 2026, DeepSeek V3)
+
+| Version | Trades | Net PnL | Win Rate | Profit Factor | Sharpe |
+|---|---|---|---|---|---|
+| Passthrough (no LLM) | 53 | +$117.18 | 39.6% | 1.22 | 1.14 |
+| LLM only (no feedback) | 47 | +$25.90 | 48.9% | 1.07 | 0.40 |
+| LLM + expanded history + unfiltered feedback | 36 | +$40.50 | 52.8% | 1.16 | 0.90 |
+| **LLM + expanded history + regime-filtered feedback** | **35** | **+$78.04** | **51.4%** | **1.32** | **1.77** |
+
+Key insight: regime-filtered feedback nearly doubled Sharpe (0.90 → 1.77) by showing the LLM only past decisions from similar volatility conditions. See `docs/journal/2026-04-13_llm_filtering_enhancements.md` for full details.
 
 ### What We've Learned (Honest Summary)
 
@@ -187,15 +201,15 @@ The Darvas strategy has higher per-trade quality. The 4H level strategy has 10x 
 | Darvas Box breakout | Consolidation breakout signal | **Yes on EURUSD with SMA** (regime-dependent alone) |
 | 4H swing level breakout | S/R level breakout signal | **Promising — under investigation** |
 | Trail10@60 SL management | Risk management | **Yes IS — not independently OOS validated** |
-| Grok LLM filter | Contextual judgment | **Not yet tested (Stage 2)** |
+| Grok LLM filter | Contextual judgment | **Yes — DeepSeek V3 via OpenRouter, regime-filtered feedback loop, Sharpe 1.77** |
 
 ### Key Decisions (Finalized 2026-04-05)
 
 | Decision | Value |
 |---|---|
 | Instruments | XAUUSD + EURUSD + USDJPY (all from day one) |
-| LLM | Grok 4-1 Fast (swappable via protocol) |
-| Confidence threshold | 75 |
+| LLM | DeepSeek V3 via OpenRouter (swappable via protocol + base_url) |
+| Confidence threshold | 75 (validated optimal for DeepSeek V3) |
 | Short trades | Both long and short enabled |
 | Darvas params | Optimized per instrument via grid search (see Backtest Results below) |
 | Economic calendar | Grok training knowledge initially; external API later |
@@ -497,8 +511,11 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 | 10 | Grok LLM gate for ORB + Darvas | ✅ Complete (3 bugs fixed, first live call successful) |
 | 11 | Diagnostic logging (formation progress, level proximity) | ✅ Complete |
 | 12 | Historical seed increased to 5D (SMA + levels ready at startup) | ✅ Complete |
-| 13 | Walk-forward validation | 🔲 Future |
-| 14 | Integration replay test | 🔲 Future |
+| 13 | Historical replay simulator | ✅ Complete (multi-provider LLM, configurable model/base_url) |
+| 14 | LLM model comparison (5 models) | ✅ Complete — **DeepSeek V3 winner** (70% WR, 3.57 PF, Sharpe 8.84) |
+| 15 | LLM filtering enhancements | ✅ Complete — expanded history (20 daily + 4h bars), regime-filtered feedback loop, live auto-assessment |
+| 16 | Walk-forward validation | 🔲 Future |
+| 17 | Integration replay test | 🔲 Future |
 
 ### Open Questions
 
@@ -509,7 +526,12 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 5. **Integration replay test** — record tick stream → replay through MultiStrategyRunner → verify order flow
 6. ~~Grok LLM gate for ORB~~ **RESOLVED: sync OpenAI client, stop>=0 validator, on_bar() deferred eval**
 7. **Daily bar refresh** — ORB daily bars only loaded at startup; should refresh on daily reset
-8. **Recent 1-min bars in ORBSignalContext** — not yet included for Grok context
+8. ~~**Recent 1-min bars in ORBSignalContext**~~ **RESOLVED: Added 4-hour bars (5 days) + 20 daily bars + trend context**
+9. ~~**Prompt optimization**~~ **RESOLVED: Changed to "be calibrated" — 71% PnL improvement (10→27 trades, $132→$227)**
+10. ~~**LLM feedback loop Step 2**~~ **RESOLVED: Auto-assessment wired for both replay and live; regime-filtered feedback table injected per-call**
+11. **LLM feedback loop Step 3** — Track rejection pattern distribution, show LLM its own biases
+12. **Live timeout** — DeepSeek V3 averages ~8s but can spike to 18s; 10s timeout may be too tight
+13. **Drawdown management** — calibrated prompt increased max drawdown from $51.80 to $97.00; may need tighter risk controls
 
 ### Full Design
 
@@ -592,5 +614,5 @@ Three standards govern all development:
 - **OS:** Windows
 - **Python:** 3.14.3
 - **IBKR:** IB Gateway on port 4002 (paper trading)
-- **Grok API:** xAI via openai.AsyncOpenAI, model `grok-4-1-fast-reasoning`
+- **LLM API:** OpenRouter (multi-provider), default model `deepseek/deepseek-chat-v3-0324` (xAI Grok also available)
 - **Key packages:** ib_async (swing agent), ib_insync (v8/v11), pydantic, pandas, numpy, pytest

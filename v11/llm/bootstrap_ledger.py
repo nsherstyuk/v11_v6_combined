@@ -274,6 +274,9 @@ def call_grok_for_day(
             o=d["open"], h=d["high"], l=d["low"], c=d["close"],
         ))
 
+    # Compute atr_regime from daily bars (range_size / avg daily range)
+    atr_regime = range_vs_avg  # best proxy available from daily data
+
     context = ORBSignalContext(
         instrument=instrument,
         range_high=range_high,
@@ -281,6 +284,7 @@ def call_grok_for_day(
         range_size=round(range_size, 2),
         range_size_pct=round(size_pct, 3),
         range_vs_avg=round(range_vs_avg, 2),
+        atr_regime=round(atr_regime, 2),
         current_price=mid,
         distance_from_high=round(mid - range_high, 2),
         distance_from_low=round(mid - range_low, 2),

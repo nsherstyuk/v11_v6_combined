@@ -91,7 +91,11 @@ def parse_args() -> argparse.Namespace:
                    choices=["passthrough", "live", "cached"],
                    help="LLM filter mode (default: passthrough)")
     p.add_argument("--grok-key", default="",
-                   help="Grok API key (or set XAI_API_KEY env var)")
+                   help="LLM API key (or set XAI_API_KEY / OPENROUTER_API_KEY env var)")
+    p.add_argument("--model", default="grok-4-1-fast-reasoning",
+                   help="LLM model name (e.g. deepseek/deepseek-r1, google/gemini-2.5-pro)")
+    p.add_argument("--base-url", default="https://api.x.ai/v1",
+                   help="LLM API base URL (use https://openrouter.ai/api/v1 for OpenRouter)")
     p.add_argument("--verbosity", default="normal",
                    choices=["quiet", "normal", "verbose"],
                    help="Console output verbosity")
@@ -111,7 +115,7 @@ def main() -> None:
     log = logging.getLogger("v11_replay")
 
     # Resolve API key from args or env
-    grok_key = args.grok_key or os.environ.get("XAI_API_KEY", "") or os.environ.get("GROK_API_KEY", "")
+    grok_key = args.grok_key or os.environ.get("OPENROUTER_API_KEY", "") or os.environ.get("XAI_API_KEY", "") or os.environ.get("GROK_API_KEY", "")
 
     config = ReplayConfig(
         instruments=[i.upper() for i in args.instrument],
@@ -119,6 +123,8 @@ def main() -> None:
         end_date=args.end,
         llm_mode=args.llm,
         grok_api_key=grok_key,
+        grok_model=args.model,
+        llm_base_url=args.base_url,
         llm_confidence_threshold=args.confidence,
         output_dir=args.output_dir,
         event_verbosity=args.verbosity,

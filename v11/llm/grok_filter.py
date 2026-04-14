@@ -43,12 +43,13 @@ class GrokFilter:
         self,
         api_key: str,
         model: str = "grok-4-1-fast-reasoning",
+        base_url: str = "https://api.x.ai/v1",
         timeout: float = 30.0,
         log_dir: Optional[str] = None,
     ):
         self._client = OpenAI(
             api_key=api_key,
-            base_url="https://api.x.ai/v1",
+            base_url=base_url,
         )
         self._model = model
         self._timeout = timeout
@@ -58,7 +59,7 @@ class GrokFilter:
 
         # Decision ledger for feedback loop
         self._ledger = DecisionLedger(log_dir) if log_dir else None
-        self._feedback_table: str = ""
+        self._feedback_table: str = ""  # fallback unfiltered table
         if self._ledger:
             self._feedback_table = self._ledger.build_feedback_table()
             if self._feedback_table:
@@ -67,6 +68,40 @@ class GrokFilter:
             else:
                 logger.info("Decision ledger: no assessed decisions yet")
 
+    def refresh_feedback(self) -> None:
+        """Rebuild fallback feedback table from ledger (called after new assessments)."""
+        if self._ledger:
+            self._feedback_table = self._ledger.build_feedback_table()
+            stats = self._ledger.stats
+            assessed = stats.get("assessed", 0)
+            if assessed > 0:
+                logger.info(
+                    f"Feedback refreshed: {assessed} assessed, "
+                    f"accuracy={stats.get('accuracy_pct', 0)}%")
+
+    def _build_orb_feedback(self, context: ORBSignalContext) -> str:
+        """Build regime-filtered feedback for ORB signals."""
+        if not self._ledger:
+            return self._feedback_table
+        return self._ledger.build_regime_filtered_table(
+            strategy="ORB",
+            regime_key="atr_regime",
+            regime_value=context.atr_regime,
+            regime_tolerance=0.3,
+        ) or self._feedback_table
+
+    def _build_darvas_feedback(self, context: SignalContext) -> str:
+        """Build regime-filtered feedback for Darvas/Retest signals."""
+        if not self._ledger:
+            return self._feedback_table
+        strategy = "DARVAS" if context.signal_type == "DARVAS_BREAKOUT" else "4H_RETEST"
+        return self._ledger.build_regime_filtered_table(
+            strategy=strategy,
+            regime_key="atr_vs_avg",
+            regime_value=context.atr_vs_avg,
+            regime_tolerance=0.3,
+        ) or self._feedback_table
+
     async def evaluate_signal(self, context: SignalContext) -> FilterDecision:
         """Evaluate a breakout signal via Grok.
 
@@ -74,14 +109,16 @@ class GrokFilter:
         Logs every request/response pair to grok_logs/.
         """
         context_json = context.model_dump_json(indent=2)
-        prompt = build_signal_prompt(context_json, feedback=self._feedback_table)
+        feedback = self._build_darvas_feedback(context)
+        prompt = build_signal_prompt(context_json, feedback=feedback)
 
         start_time = time.monotonic()
         raw_response = None
         error_msg = None
 
         try:
-            response = self._client.chat.completions.create(
+            response = await asyncio.to_thread(
+                self._client.chat.completions.create,
                 model=self._model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
@@ -131,6 +168,7 @@ class GrokFilter:
                         "box_top": context.box_top,
                         "box_bottom": context.box_bottom,
                         "atr": context.atr,
+                        "atr_vs_avg": context.atr_vs_avg,
                         "session": context.session,
                     },
                 )
@@ -245,7 +283,8 @@ class GrokFilter:
         mechanical approval because the ORB edge exists without the LLM.
         """
         context_json = context.model_dump_json(indent=2)
-        prompt = build_orb_signal_prompt(context_json, feedback=self._feedback_table)
+        feedback = self._build_orb_feedback(context)
+        prompt = build_orb_signal_prompt(context_json, feedback=feedback)
         start_time = time.monotonic()
         raw_response = None
 
@@ -255,7 +294,8 @@ class GrokFilter:
             raw_response = None
 
             try:
-                response = self._client.chat.completions.create(
+                response = await asyncio.to_thread(
+                    self._client.chat.completions.create,
                     model=self._model,
                     messages=[
                         {"role": "system", "content": ORB_SYSTEM_PROMPT},
@@ -299,6 +339,7 @@ class GrokFilter:
                             "range_low": context.range_low,
                             "range_size": context.range_size,
                             "range_vs_avg": context.range_vs_avg,
+                            "atr_regime": context.atr_regime,
                             "current_price": context.current_price,
                             "session": context.session,
                             "day_of_week": context.day_of_week,

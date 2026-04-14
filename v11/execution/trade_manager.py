@@ -81,6 +81,9 @@ class TradeManager:
         self._entry_trade = None
         self._sl_order = None
 
+        # Trade closed callback (for auto-assessment)
+        self.on_trade_closed = None  # Callable[[TradeRecord], None]
+
         # Daily counters
         self.daily_trades: int = 0
         self.daily_pnl: float = 0.0
@@ -363,6 +366,13 @@ class TradeManager:
 
         # Reset state
         self._reset_trade_state()
+
+        # Notify callback (for auto-assessment)
+        if self.on_trade_closed:
+            try:
+                self.on_trade_closed(record)
+            except Exception as e:
+                self._log.warning(f"on_trade_closed callback error: {e}")
 
         return record
 

@@ -1,0 +1,1646 @@
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Create file
+ docs\superpowers\plans\2026-04-12-historical-replay-simulator.md
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+     1 # Historical Replay Simulator Implementation Plan
+     2
+     3 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowe
+       rs:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+     4
+     5 **Goal:** Build a replay simulator that feeds historical 1-min bars through the actual live strategy code (Darvas + 4
+       H Retest) to verify correctness and measure performance without IBKR.
+     6
+     7 **Architecture:** ReplayRunner loads historical bars via the existing `data_loader`, creates the same strategy engine
+       s as the live system (InstrumentEngine, LevelRetestEngine), and feeds bars directly to them bypassing BarAggregator.
+       TradeManager runs in dry_run mode with a stub connection. LLM filter is configurable: passthrough, real Grok, or cach
+       ed responses.
+     8
+     9 **Tech Stack:** Python 3.11+, pytest, asyncio, existing v11 modules (no new dependencies)
+    10
+    11 **Spec:** `docs/superpowers/specs/2026-04-12-historical-replay-simulator-design.md`
+    12
+    13 ---
+    14
+    15 ## File Structure
+    16
+    17 ```
+    18 v11/replay/                     # New module
+    19     __init__.py                 # Empty
+    20     config.py                   # ReplayConfig dataclass
+    21     stub_connection.py          # StubIBKRConnection (satisfies dry_run TradeManager)
+    22     cached_filter.py            # CachedFilter (record/replay LLM responses)
+    23     event_logger.py             # EventLogger (structured JSONL + console)
+    24     metrics.py                  # Compute summary stats from trade records
+    25     replay_runner.py            # ReplayRunner (main loop + assembly)
+    26     run_replay.py               # CLI entry point (argparse)
+    27
+    28 v11/tests/
+    29     test_replay_config.py       # Config validation tests
+    30     test_stub_connection.py     # Stub connection tests
+    31     test_cached_filter.py       # Cache hit/miss/persistence tests
+    32     test_event_logger.py        # Event emission + file output tests
+    33     test_replay_metrics.py      # Metrics computation tests
+    34     test_replay_runner.py       # Integration: full replay on sample data
+    35 ```
+    36
+    37 ---
+    38
+    39 ### Task 1: ReplayConfig + StubConnection
+    40
+    41 **Files:**
+    42 - Create: `v11/replay/__init__.py`
+    43 - Create: `v11/replay/config.py`
+    44 - Create: `v11/replay/stub_connection.py`
+    45 - Test: `v11/tests/test_replay_config.py`
+    46 - Test: `v11/tests/test_stub_connection.py`
+    47
+    48 - [ ] **Step 1: Create the replay package**
+    49
+    50 Create `v11/replay/__init__.py` as an empty file.
+    51
+    52 - [ ] **Step 2: Write failing test for ReplayConfig**
+    53
+    54 ```python
+    55 # v11/tests/test_replay_config.py
+    56 """Tests for ReplayConfig — validation and defaults."""
+    57 import pytest
+    58 from v11.replay.config import ReplayConfig
+    59
+    60
+    61 class TestReplayConfigDefaults:
+    62     def test_default_llm_mode_is_passthrough(self):
+    63         cfg = ReplayConfig(instruments=["EURUSD"], start_date="2025-01-01", end_date="2025-03-31")
+    64         assert cfg.llm_mode == "passthrough"
+    65
+    66     def test_default_slippage(self):
+    67         cfg = ReplayConfig(instruments=["EURUSD"], start_date="2025-01-01", end_date="2025-03-31")
+    68         assert cfg.slippage_pips == 0.5
+    69
+    70     def test_default_dry_run_is_true(self):
+    71         cfg = ReplayConfig(instruments=["EURUSD"], start_date="2025-01-01", end_date="2025-03-31")
+    72         assert cfg.dry_run is True
+    73
+    74
+    75 class TestReplayConfigValidation:
+    76     def test_validate_rejects_empty_instruments(self):
+    77         cfg = ReplayConfig(instruments=[], start_date="2025-01-01", end_date="2025-03-31")
+    78         with pytest.raises(ValueError, match="instruments"):
+    79             cfg.validate()
+    80
+    81     def test_validate_rejects_invalid_llm_mode(self):
+    82         cfg = ReplayConfig(instruments=["EURUSD"], start_date="2025-01-01", end_date="2025-03-31", llm_mode="gpt5")
+    83         with pytest.raises(ValueError, match="llm_mode"):
+    84             cfg.validate()
+    85
+    86     def test_validate_rejects_start_after_end(self):
+    87         cfg = ReplayConfig(instruments=["EURUSD"], start_date="2025-06-01", end_date="2025-03-31")
+    88         with pytest.raises(ValueError, match="start_date"):
+    89             cfg.validate()
+    90
+    91     def test_validate_passes_valid_config(self):
+    92         cfg = ReplayConfig(instruments=["EURUSD"], start_date="2025-01-01", end_date="2025-03-31")
+    93         cfg.validate()  # should not raise
+    94 ```
+    95
+    96 - [ ] **Step 3: Run test to verify it fails**
+    97
+    98 Run: `python -m pytest v11/tests/test_replay_config.py -v`
+    99 Expected: ImportError — `v11.replay.config` does not exist yet
+   100
+   101 - [ ] **Step 4: Implement ReplayConfig**
+   102
+   103 ```python
+   104 # v11/replay/config.py
+   105 """Replay simulator configuration."""
+   106 from __future__ import annotations
+   107
+   108 from dataclasses import dataclass, field
+   109 from datetime import datetime
+   110
+   111 VALID_LLM_MODES = {"passthrough", "live", "cached"}
+   112
+   113
+   114 @dataclass
+   115 class ReplayConfig:
+   116     """Configuration for a historical replay run."""
+   117
+   118     # Required
+   119     instruments: list[str]
+   120     start_date: str              # "YYYY-MM-DD"
+   121     end_date: str                # "YYYY-MM-DD"
+   122
+   123     # LLM mode
+   124     llm_mode: str = "passthrough"    # "passthrough" | "live" | "cached"
+   125     grok_api_key: str = ""
+   126     grok_model: str = "grok-4-1-fast-reasoning"
+   127     llm_cache_path: str = "replay_llm_cache.json"
+   128     llm_confidence_threshold: int = 75
+   129
+   130     # Execution simulation
+   131     slippage_pips: float = 0.5
+   132     commission_per_lot: float = 2.0
+   133
+   134     # Risk manager
+   135     max_daily_loss: float = 500.0
+   136     max_daily_trades: int = 10
+   137     max_concurrent_positions: int = 3
+   138
+   139     # Seeding
+   140     seed_bars: int = 500             # bars to seed before replay starts
+   141
+   142     # Output
+   143     output_dir: str = "v11/replay/results"
+   144     event_verbosity: str = "normal"  # "quiet" | "normal" | "verbose"
+   145
+   146     # Dry run (always True for replay — no real orders)
+   147     dry_run: bool = True
+   148
+   149     def validate(self) -> None:
+   150         """Validate config values. Raises ValueError on problems."""
+   151         if not self.instruments:
+   152             raise ValueError("instruments must not be empty")
+   153         if self.llm_mode not in VALID_LLM_MODES:
+   154             raise ValueError(
+   155                 f"llm_mode must be one of {VALID_LLM_MODES}, got '{self.llm_mode}'")
+   156         start = datetime.strptime(self.start_date, "%Y-%m-%d")
+   157         end = datetime.strptime(self.end_date, "%Y-%m-%d")
+   158         if start > end:
+   159             raise ValueError(
+   160                 f"start_date ({self.start_date}) must be before end_date ({self.end_date})")
+   161
+   162     @property
+   163     def start_dt(self) -> datetime:
+   164         return datetime.strptime(self.start_date, "%Y-%m-%d")
+   165
+   166     @property
+   167     def end_dt(self) -> datetime:
+   168         return datetime.strptime(self.end_date, "%Y-%m-%d")
+   169 ```
+   170
+   171 - [ ] **Step 5: Run test to verify it passes**
+   172
+   173 Run: `python -m pytest v11/tests/test_replay_config.py -v`
+   174 Expected: All 7 tests PASS
+   175
+   176 - [ ] **Step 6: Write failing test for StubIBKRConnection**
+   177
+   178 ```python
+   179 # v11/tests/test_stub_connection.py
+   180 """Tests for StubIBKRConnection — minimal stub for dry_run TradeManager."""
+   181 from v11.replay.stub_connection import StubIBKRConnection
+   182
+   183
+   184 class TestStubConnection:
+   185     def test_submit_market_order_returns_none(self):
+   186         stub = StubIBKRConnection()
+   187         result = stub.submit_market_order("EURUSD", "long", 20000)
+   188         assert result is None
+   189
+   190     def test_submit_stop_order_returns_none(self):
+   191         stub = StubIBKRConnection()
+   192         result = stub.submit_stop_order("EURUSD", "long", 20000, 1.1000)
+   193         assert result is None
+   194
+   195     def test_get_position_size_returns_zero(self):
+   196         stub = StubIBKRConnection()
+   197         assert stub.get_position_size("EUR", "CASH") == 0.0
+   198
+   199     def test_has_position_returns_false(self):
+   200         stub = StubIBKRConnection()
+   201         assert stub.has_position("EUR", "CASH") is False
+   202
+   203     def test_sleep_is_noop(self):
+   204         stub = StubIBKRConnection()
+   205         stub.sleep(5)  # should not block
+   206
+   207     def test_get_fill_commission_returns_zero(self):
+   208         stub = StubIBKRConnection()
+   209         assert stub.get_fill_commission(None) == 0.0
+   210 ```
+   211
+   212 - [ ] **Step 7: Run test to verify it fails**
+   213
+   214 Run: `python -m pytest v11/tests/test_stub_connection.py -v`
+   215 Expected: ImportError
+   216
+   217 - [ ] **Step 8: Implement StubIBKRConnection**
+   218
+   219 ```python
+   220 # v11/replay/stub_connection.py
+   221 """Stub IBKR connection for replay mode.
+   222
+   223 Satisfies the duck-type interface that TradeManager calls when dry_run=True.
+   224 In dry_run mode, TradeManager never actually calls submit_market_order or
+   225 submit_stop_order — but we provide them anyway for safety.
+   226 """
+   227 from __future__ import annotations
+   228
+   229 import logging
+   230
+   231 log = logging.getLogger(__name__)
+   232
+   233
+   234 class _StubIB:
+   235     """Minimal stub for conn.ib attribute (never called in dry_run)."""
+   236
+   237     def cancelOrder(self, order):
+   238         pass
+   239
+   240
+   241 class StubIBKRConnection:
+   242     """No-op IBKR connection for replay/dry-run use.
+   243
+   244     TradeManager in dry_run=True mode never touches the connection,
+   245     but it stores self._conn and references self._conn.ib in the
+   246     _execute_exit block guarded by `if not self._dry_run`.
+   247     This stub ensures no AttributeError if something unexpected
+   248     accesses the connection.
+   249     """
+   250
+   251     def __init__(self):
+   252         self.ib = _StubIB()
+   253
+   254     def submit_market_order(self, pair_name, direction, quantity):
+   255         log.debug(f"StubIBKR: market order {pair_name} {direction} {quantity} (no-op)")
+   256         return None
+   257
+   258     def submit_stop_order(self, pair_name, direction, quantity, stop_price, tick_size=0.01):
+   259         log.debug(f"StubIBKR: stop order {pair_name} {stop_price} (no-op)")
+   260         return None
+   261
+   262     def close_position(self, pair_name, direction, quantity):
+   263         return None
+   264
+   265     def has_position(self, symbol, sec_type):
+   266         return False
+   267
+   268     def get_position_size(self, symbol, sec_type):
+   269         return 0.0
+   270
+   271     def get_fill_commission(self, trade):
+   272         return 0.0
+   273
+   274     def sleep(self, seconds):
+   275         pass  # no-op in replay
+   276
+   277     def cancel_all_orders(self):
+   278         pass
+   279 ```
+   280
+   281 - [ ] **Step 9: Run test to verify it passes**
+   282
+   283 Run: `python -m pytest v11/tests/test_stub_connection.py -v`
+   284 Expected: All 6 tests PASS
+   285
+   286 - [ ] **Step 10: Commit**
+   287
+   288 ```bash
+   289 git add v11/replay/__init__.py v11/replay/config.py v11/replay/stub_connection.py v11/tests/test_replay_config.py v11
+       /tests/test_stub_connection.py
+   290 git commit -m "feat(replay): add ReplayConfig and StubIBKRConnection"
+   291 ```
+   292
+   293 ---
+   294
+   295 ### Task 2: CachedFilter
+   296
+   297 **Files:**
+   298 - Create: `v11/replay/cached_filter.py`
+   299 - Test: `v11/tests/test_cached_filter.py`
+   300
+   301 - [ ] **Step 1: Write failing tests for CachedFilter**
+   302
+   303 ```python
+   304 # v11/tests/test_cached_filter.py
+   305 """Tests for CachedFilter — record/replay LLM responses."""
+   306 import json
+   307 import asyncio
+   308 from pathlib import Path
+   309 from unittest.mock import AsyncMock
+   310
+   311 import pytest
+   312
+   313 from v11.core.types import FilterDecision
+   314 from v11.llm.models import SignalContext, BarData
+   315 from v11.replay.cached_filter import CachedFilter
+   316
+   317
+   318 def _make_context(instrument="EURUSD", breakout_price=1.1050) -> SignalContext:
+   319     return SignalContext(
+   320         direction="long",
+   321         instrument=instrument,
+   322         box_top=1.1050,
+   323         box_bottom=1.1000,
+   324         box_duration_bars=30,
+   325         box_width_atr=1.5,
+   326         breakout_price=breakout_price,
+   327         atr=0.0010,
+   328         buy_ratio_at_breakout=0.65,
+   329         buy_ratio_trend="increasing",
+   330         tick_quality="HIGH",
+   331         volume_classification="CONFIRMING",
+   332         recent_bars=[BarData(t="2025-01-15T14:30:00", o=1.104, h=1.105, l=1.103, c=1.105, bv=100, sv=80, tc=50)],
+   333         current_time_utc="2025-01-15T14:47:00",
+   334         session="LONDON_NY_OVERLAP",
+   335     )
+   336
+   337
+   338 def _make_decision() -> FilterDecision:
+   339     return FilterDecision(
+   340         approved=True, confidence=85,
+   341         entry_price=1.1050, stop_price=1.1000, target_price=1.1150,
+   342         reasoning="test", risk_flags=[],
+   343     )
+   344
+   345
+   346 class TestCacheHitMiss:
+   347     def test_cache_miss_calls_inner_filter(self, tmp_path):
+   348         inner = AsyncMock()
+   349         inner.evaluate_signal = AsyncMock(return_value=_make_decision())
+   350         cache = CachedFilter(inner_filter=inner, cache_path=str(tmp_path / "cache.json"))
+   351
+   352         result = asyncio.get_event_loop().run_until_complete(
+   353             cache.evaluate_signal(_make_context()))
+   354
+   355         assert result.approved is True
+   356         assert result.confidence == 85
+   357         inner.evaluate_signal.assert_called_once()
+   358
+   359     def test_cache_hit_skips_inner_filter(self, tmp_path):
+   360         inner = AsyncMock()
+   361         inner.evaluate_signal = AsyncMock(return_value=_make_decision())
+   362         cache = CachedFilter(inner_filter=inner, cache_path=str(tmp_path / "cache.json"))
+   363         ctx = _make_context()
+   364
+   365         # First call: cache miss
+   366         asyncio.get_event_loop().run_until_complete(cache.evaluate_signal(ctx))
+   367         # Second call: cache hit
+   368         result = asyncio.get_event_loop().run_until_complete(cache.evaluate_signal(ctx))
+   369
+   370         assert result.approved is True
+   371         assert inner.evaluate_signal.call_count == 1  # only called once
+   372
+   373
+   374 class TestCachePersistence:
+   375     def test_cache_saves_to_file(self, tmp_path):
+   376         inner = AsyncMock()
+   377         inner.evaluate_signal = AsyncMock(return_value=_make_decision())
+   378         cache_path = str(tmp_path / "cache.json")
+   379         cache = CachedFilter(inner_filter=inner, cache_path=cache_path)
+   380
+   381         asyncio.get_event_loop().run_until_complete(
+   382             cache.evaluate_signal(_make_context()))
+   383         cache.save()
+   384
+   385         assert Path(cache_path).exists()
+   386         data = json.loads(Path(cache_path).read_text())
+   387         assert len(data) == 1
+   388
+   389     def test_cache_loads_from_file(self, tmp_path):
+   390         inner = AsyncMock()
+   391         inner.evaluate_signal = AsyncMock(return_value=_make_decision())
+   392         cache_path = str(tmp_path / "cache.json")
+   393
+   394         # First cache instance: populate
+   395         cache1 = CachedFilter(inner_filter=inner, cache_path=cache_path)
+   396         asyncio.get_event_loop().run_until_complete(
+   397             cache1.evaluate_signal(_make_context()))
+   398         cache1.save()
+   399
+   400         # Second cache instance: load from file
+   401         inner2 = AsyncMock()
+   402         inner2.evaluate_signal = AsyncMock(return_value=_make_decision())
+   403         cache2 = CachedFilter(inner_filter=inner2, cache_path=cache_path)
+   404
+   405         result = asyncio.get_event_loop().run_until_complete(
+   406             cache2.evaluate_signal(_make_context()))
+   407
+   408         assert result.approved is True
+   409         inner2.evaluate_signal.assert_not_called()  # served from persisted cache
+   410
+   411
+   412 class TestPassthroughOnCacheMiss:
+   413     def test_no_inner_filter_returns_passthrough(self, tmp_path):
+   414         cache = CachedFilter(inner_filter=None, cache_path=str(tmp_path / "cache.json"))
+   415
+   416         result = asyncio.get_event_loop().run_until_complete(
+   417             cache.evaluate_signal(_make_context()))
+   418
+   419         # With no inner filter and no cache hit, falls back to passthrough
+   420         assert result.approved is True
+   421         assert result.confidence == 0
+   422         assert "cache miss" in result.reasoning.lower()
+   423 ```
+   424
+   425 - [ ] **Step 2: Run test to verify it fails**
+   426
+   427 Run: `python -m pytest v11/tests/test_cached_filter.py -v`
+   428 Expected: ImportError
+   429
+   430 - [ ] **Step 3: Implement CachedFilter**
+   431
+   432 ```python
+   433 # v11/replay/cached_filter.py
+   434 """CachedFilter — Record/replay LLM filter responses.
+   435
+   436 Wraps any LLMFilter implementation with a JSON cache layer.
+   437 On cache miss: calls inner filter (if provided), stores response.
+   438 On cache hit: returns stored response (instant, free, deterministic).
+   439
+   440 Cache key: SHA-256 of SignalContext JSON (stable, deterministic).
+   441 Cache storage: JSON file mapping hash -> FilterDecision fields.
+   442 """
+   443 from __future__ import annotations
+   444
+   445 import hashlib
+   446 import json
+   447 import logging
+   448 from pathlib import Path
+   449 from typing import Optional
+   450
+   451 from ..core.types import FilterDecision
+   452 from ..llm.models import SignalContext
+   453
+   454 log = logging.getLogger(__name__)
+   455
+   456
+   457 class CachedFilter:
+   458     """LLM filter with transparent caching.
+   459
+   460     Satisfies the LLMFilter protocol.
+   461     """
+   462
+   463     def __init__(
+   464         self,
+   465         inner_filter: Optional[object] = None,
+   466         cache_path: str = "replay_llm_cache.json",
+   467     ):
+   468         self._inner = inner_filter
+   469         self._cache_path = Path(cache_path)
+   470         self._cache: dict[str, dict] = {}
+   471         self._hits = 0
+   472         self._misses = 0
+   473         self._load_cache()
+   474
+   475     def _load_cache(self) -> None:
+   476         if self._cache_path.exists():
+   477             try:
+   478                 self._cache = json.loads(self._cache_path.read_text())
+   479                 log.info(f"CachedFilter: loaded {len(self._cache)} entries from {self._cache_path}")
+   480             except (json.JSONDecodeError, IOError) as e:
+   481                 log.warning(f"CachedFilter: failed to load cache: {e}")
+   482                 self._cache = {}
+   483
+   484     def save(self) -> None:
+   485         """Persist cache to disk."""
+   486         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+   487         self._cache_path.write_text(json.dumps(self._cache, indent=2))
+   488         log.info(f"CachedFilter: saved {len(self._cache)} entries "
+   489                  f"(hits={self._hits}, misses={self._misses})")
+   490
+   491     @staticmethod
+   492     def _cache_key(context: SignalContext) -> str:
+   493         raw = context.model_dump_json(indent=None)
+   494         return hashlib.sha256(raw.encode()).hexdigest()[:16]
+   495
+   496     async def evaluate_signal(self, context: SignalContext) -> FilterDecision:
+   497         key = self._cache_key(context)
+   498
+   499         if key in self._cache:
+   500             self._hits += 1
+   501             entry = self._cache[key]
+   502             log.debug(f"CachedFilter: HIT {key[:8]} -> approved={entry['approved']}")
+   503             return FilterDecision(
+   504                 approved=entry["approved"],
+   505                 confidence=entry["confidence"],
+   506                 entry_price=entry["entry_price"],
+   507                 stop_price=entry["stop_price"],
+   508                 target_price=entry["target_price"],
+   509                 reasoning=entry["reasoning"],
+   510                 risk_flags=entry.get("risk_flags", []),
+   511             )
+   512
+   513         self._misses += 1
+   514
+   515         if self._inner is not None:
+   516             decision = await self._inner.evaluate_signal(context)
+   517             self._cache[key] = {
+   518                 "approved": decision.approved,
+   519                 "confidence": decision.confidence,
+   520                 "entry_price": decision.entry_price,
+   521                 "stop_price": decision.stop_price,
+   522                 "target_price": decision.target_price,
+   523                 "reasoning": decision.reasoning,
+   524                 "risk_flags": list(decision.risk_flags),
+   525             }
+   526             log.debug(f"CachedFilter: MISS {key[:8]} -> called inner, approved={decision.approved}")
+   527             return decision
+   528
+   529         # No inner filter and no cache hit: passthrough
+   530         log.debug(f"CachedFilter: MISS {key[:8]} -> no inner filter, passthrough")
+   531         return FilterDecision(
+   532             approved=True,
+   533             confidence=0,
+   534             entry_price=context.breakout_price,
+   535             stop_price=context.box_bottom,
+   536             target_price=0.0,
+   537             reasoning="Cache miss — no inner filter, passthrough approval",
+   538             risk_flags=["cache_miss"],
+   539         )
+   540
+   541     async def evaluate_orb_signal(self, context) -> FilterDecision:
+   542         """ORB not supported in replay — passthrough."""
+   543         return FilterDecision(
+   544             approved=True, confidence=0,
+   545             entry_price=0.0, stop_price=0.0, target_price=0.0,
+   546             reasoning="ORB not supported in replay",
+   547         )
+   548
+   549     @property
+   550     def stats(self) -> dict:
+   551         return {"hits": self._hits, "misses": self._misses, "size": len(self._cache)}
+   552 ```
+   553
+   554 - [ ] **Step 4: Run test to verify it passes**
+   555
+   556 Run: `python -m pytest v11/tests/test_cached_filter.py -v`
+   557 Expected: All 5 tests PASS
+   558
+   559 - [ ] **Step 5: Commit**
+   560
+   561 ```bash
+   562 git add v11/replay/cached_filter.py v11/tests/test_cached_filter.py
+   563 git commit -m "feat(replay): add CachedFilter for LLM response caching"
+   564 ```
+   565
+   566 ---
+   567
+   568 ### Task 3: EventLogger
+   569
+   570 **Files:**
+   571 - Create: `v11/replay/event_logger.py`
+   572 - Test: `v11/tests/test_event_logger.py`
+   573
+   574 - [ ] **Step 1: Write failing tests for EventLogger**
+   575
+   576 ```python
+   577 # v11/tests/test_event_logger.py
+   578 """Tests for EventLogger — structured replay event logging."""
+   579 import json
+   580 from pathlib import Path
+   581
+   582 import pytest
+   583
+   584 from v11.replay.event_logger import EventLogger
+   585
+   586
+   587 class TestEventEmission:
+   588     def test_emit_writes_to_file(self, tmp_path):
+   589         path = tmp_path / "events.jsonl"
+   590         logger = EventLogger(output_path=str(path), verbosity="quiet")
+   591
+   592         logger.emit("BOX_FORMED", strategy="DARVAS", instrument="EURUSD",
+   593                      timestamp="2025-01-15T14:32:00",
+   594                      data={"top": 1.0892, "bottom": 1.0875})
+   595         logger.close()
+   596
+   597         lines = path.read_text().strip().split("\n")
+   598         assert len(lines) == 1
+   599         event = json.loads(lines[0])
+   600         assert event["event"] == "BOX_FORMED"
+   601         assert event["strategy"] == "DARVAS"
+   602         assert event["instrument"] == "EURUSD"
+   603         assert event["data"]["top"] == 1.0892
+   604
+   605     def test_multiple_events_append(self, tmp_path):
+   606         path = tmp_path / "events.jsonl"
+   607         logger = EventLogger(output_path=str(path), verbosity="quiet")
+   608
+   609         logger.emit("BOX_FORMED", strategy="DARVAS", instrument="EURUSD",
+   610                      timestamp="2025-01-15T14:32:00", data={})
+   611         logger.emit("BREAKOUT_DETECTED", strategy="DARVAS", instrument="EURUSD",
+   612                      timestamp="2025-01-15T14:47:00", data={})
+   613         logger.close()
+   614
+   615         lines = path.read_text().strip().split("\n")
+   616         assert len(lines) == 2
+   617
+   618
+   619 class TestEventCounting:
+   620     def test_event_counts_tracked(self, tmp_path):
+   621         path = tmp_path / "events.jsonl"
+   622         logger = EventLogger(output_path=str(path), verbosity="quiet")
+   623
+   624         logger.emit("BOX_FORMED", strategy="DARVAS", instrument="EURUSD",
+   625                      timestamp="t1", data={})
+   626         logger.emit("BOX_FORMED", strategy="DARVAS", instrument="EURUSD",
+   627                      timestamp="t2", data={})
+   628         logger.emit("TRADE_ENTERED", strategy="DARVAS", instrument="EURUSD",
+   629                      timestamp="t3", data={})
+   630
+   631         counts = logger.get_counts()
+   632         assert counts["BOX_FORMED"] == 2
+   633         assert counts["TRADE_ENTERED"] == 1
+   634
+   635
+   636 class TestTradeRecordCollection:
+   637     def test_trade_exited_events_collected(self, tmp_path):
+   638         path = tmp_path / "events.jsonl"
+   639         logger = EventLogger(output_path=str(path), verbosity="quiet")
+   640
+   641         trade_data = {
+   642             "instrument": "EURUSD", "strategy": "DARVAS",
+   643             "direction": "long", "entry_price": 1.1050,
+   644             "exit_price": 1.1100, "pnl": 100.0,
+   645             "exit_reason": "TARGET", "hold_bars": 45,
+   646             "llm_confidence": 85,
+   647         }
+   648         logger.emit("TRADE_EXITED", strategy="DARVAS", instrument="EURUSD",
+   649                      timestamp="2025-01-15T15:30:00", data=trade_data)
+   650
+   651         assert len(logger.trade_records) == 1
+   652         assert logger.trade_records[0]["pnl"] == 100.0
+   653 ```
+   654
+   655 - [ ] **Step 2: Run test to verify it fails**
+   656
+   657 Run: `python -m pytest v11/tests/test_event_logger.py -v`
+   658 Expected: ImportError
+   659
+   660 - [ ] **Step 3: Implement EventLogger**
+   661
+   662 ```python
+   663 # v11/replay/event_logger.py
+   664 """EventLogger — Structured event logging for replay runs.
+   665
+   666 Emits JSON lines to a file and optionally to console.
+   667 Collects trade records for metrics computation.
+   668 """
+   669 from __future__ import annotations
+   670
+   671 import json
+   672 import logging
+   673 from collections import Counter
+   674 from pathlib import Path
+   675
+   676 log = logging.getLogger(__name__)
+   677
+   678
+   679 class EventLogger:
+   680     """Structured event logger for replay runs.
+   681
+   682     Events are written as JSONL (one JSON object per line).
+   683     Trade exit events are also collected for metrics.
+   684     """
+   685
+   686     def __init__(
+   687         self,
+   688         output_path: str,
+   689         verbosity: str = "normal",
+   690     ):
+   691         self._output_path = Path(output_path)
+   692         self._output_path.parent.mkdir(parents=True, exist_ok=True)
+   693         self._file = open(self._output_path, "w")
+   694         self._verbosity = verbosity
+   695         self._counts: Counter = Counter()
+   696         self._trade_records: list[dict] = []
+   697
+   698         # Events shown at each verbosity level
+   699         self._console_events = {
+   700             "quiet": {"TRADE_ENTERED", "TRADE_EXITED", "RISK_LIMIT_HIT"},
+   701             "normal": {
+   702                 "TRADE_ENTERED", "TRADE_EXITED", "SIGNAL_APPROVED",
+   703                 "SIGNAL_REJECTED", "LLM_RESPONSE", "RISK_LIMIT_HIT",
+   704                 "DAILY_RESET", "SESSION_START",
+   705             },
+   706             "verbose": None,  # None = show all
+   707         }
+   708
+   709     def emit(
+   710         self,
+   711         event: str,
+   712         strategy: str,
+   713         instrument: str,
+   714         timestamp: str,
+   715         data: dict,
+   716     ) -> None:
+   717         """Emit a structured event."""
+   718         record = {
+   719             "ts": timestamp,
+   720             "event": event,
+   721             "strategy": strategy,
+   722             "instrument": instrument,
+   723             "data": data,
+   724         }
+   725         self._file.write(json.dumps(record, default=str) + "\n")
+   726         self._counts[event] += 1
+   727
+   728         # Collect trade exit records for metrics
+   729         if event == "TRADE_EXITED":
+   730             self._trade_records.append(data)
+   731
+   732         # Console output based on verbosity
+   733         allowed = self._console_events.get(self._verbosity)
+   734         if allowed is None or event in allowed:
+   735             self._print_event(record)
+   736
+   737     def _print_event(self, record: dict) -> None:
+   738         event = record["event"]
+   739         ts = record["ts"]
+   740         inst = record["instrument"]
+   741         strategy = record["strategy"]
+   742         data = record["data"]
+   743
+   744         if event == "TRADE_ENTERED":
+   745             direction = data.get("direction", "?")
+   746             entry = data.get("entry_price", 0)
+   747             sl = data.get("stop_price", 0)
+   748             tp = data.get("target_price", 0)
+   749             print(f"  [{ts}] {inst} {strategy} ENTER {direction} @ {entry} SL={sl} TP={tp}")
+   750         elif event == "TRADE_EXITED":
+   751             pnl = data.get("pnl", 0)
+   752             reason = data.get("exit_reason", "?")
+   753             hold = data.get("hold_bars", 0)
+   754             print(f"  [{ts}] {inst} {strategy} EXIT {reason} PnL=${pnl:+.2f} hold={hold}bars")
+   755         elif event == "SIGNAL_APPROVED":
+   756             conf = data.get("confidence", 0)
+   757             direction = data.get("direction", "?")
+   758             print(f"  [{ts}] {inst} {strategy} APPROVED {direction} conf={conf}")
+   759         elif event == "SIGNAL_REJECTED":
+   760             reason = data.get("reason", "?")
+   761             print(f"  [{ts}] {inst} {strategy} REJECTED: {reason[:80]}")
+   762         elif event == "DAILY_RESET":
+   763             print(f"  [{ts}] --- DAILY RESET ---")
+   764         elif event == "SESSION_START":
+   765             bars = data.get("bars", 0)
+   766             print(f"  [{ts}] {inst} SESSION START ({bars} bars)")
+   767         else:
+   768             print(f"  [{ts}] {inst} {strategy} {event}")
+   769
+   770     @property
+   771     def trade_records(self) -> list[dict]:
+   772         return self._trade_records
+   773
+   774     def get_counts(self) -> dict[str, int]:
+   775         return dict(self._counts)
+   776
+   777     def close(self) -> None:
+   778         self._file.close()
+   779 ```
+   780
+   781 - [ ] **Step 4: Run test to verify it passes**
+   782
+   783 Run: `python -m pytest v11/tests/test_event_logger.py -v`
+   784 Expected: All 4 tests PASS
+   785
+   786 - [ ] **Step 5: Commit**
+   787
+   788 ```bash
+   789 git add v11/replay/event_logger.py v11/tests/test_event_logger.py
+   790 git commit -m "feat(replay): add EventLogger for structured replay logging"
+   791 ```
+   792
+   793 ---
+   794
+   795 ### Task 4: Replay Metrics
+   796
+   797 **Files:**
+   798 - Create: `v11/replay/metrics.py`
+   799 - Test: `v11/tests/test_replay_metrics.py`
+   800
+   801 - [ ] **Step 1: Write failing tests for metrics computation**
+   802
+   803 ```python
+   804 # v11/tests/test_replay_metrics.py
+   805 """Tests for replay metrics computation."""
+   806 import pytest
+   807 from v11.replay.metrics import compute_metrics
+   808
+   809
+   810 def _make_trades(pnls):
+   811     """Helper: make trade records from a list of PnLs."""
+   812     return [
+   813         {"pnl": pnl, "strategy": "DARVAS", "instrument": "EURUSD",
+   814          "exit_reason": "TARGET" if pnl > 0 else "SL"}
+   815         for pnl in pnls
+   816     ]
+   817
+   818
+   819 class TestComputeMetrics:
+   820     def test_empty_trades(self):
+   821         m = compute_metrics([])
+   822         assert m["total_trades"] == 0
+   823         assert m["net_pnl"] == 0.0
+   824
+   825     def test_all_winners(self):
+   826         trades = _make_trades([100, 200, 50])
+   827         m = compute_metrics(trades)
+   828         assert m["total_trades"] == 3
+   829         assert m["win_rate"] == 1.0
+   830         assert m["net_pnl"] == 350.0
+   831
+   832     def test_mixed_trades(self):
+   833         trades = _make_trades([100, -50, 200, -30, -20])
+   834         m = compute_metrics(trades)
+   835         assert m["total_trades"] == 5
+   836         assert m["win_rate"] == pytest.approx(0.4)
+   837         assert m["net_pnl"] == 200.0
+   838
+   839     def test_profit_factor(self):
+   840         trades = _make_trades([100, -50, 200])
+   841         m = compute_metrics(trades)
+   842         # profit_factor = gross_profit / gross_loss = 300 / 50 = 6.0
+   843         assert m["profit_factor"] == pytest.approx(6.0)
+   844
+   845     def test_max_drawdown(self):
+   846         trades = _make_trades([100, -50, -80, 200])
+   847         m = compute_metrics(trades, starting_equity=10000)
+   848         # Equity: 10000, 10100, 10050, 9970, 10170
+   849         # Peak: 10000, 10100, 10100, 10100, 10170
+   850         # DD:   0,     0,     50,    130,   0
+   851         assert m["max_drawdown"] == pytest.approx(130.0)
+   852         assert m["max_drawdown_pct"] == pytest.approx(1.287, abs=0.01)
+   853 ```
+   854
+   855 - [ ] **Step 2: Run test to verify it fails**
+   856
+   857 Run: `python -m pytest v11/tests/test_replay_metrics.py -v`
+   858 Expected: ImportError
+   859
+   860 - [ ] **Step 3: Implement metrics**
+   861
+   862 ```python
+   863 # v11/replay/metrics.py
+   864 """Replay metrics — compute summary statistics from trade records."""
+   865 from __future__ import annotations
+   866
+   867 import math
+   868 from typing import List
+   869
+   870
+   871 def compute_metrics(
+   872     trades: List[dict],
+   873     starting_equity: float = 100_000.0,
+   874 ) -> dict:
+   875     """Compute summary metrics from a list of trade records.
+   876
+   877     Each trade record must have at least a 'pnl' key (float).
+   878
+   879     Returns dict with: total_trades, net_pnl, win_rate, profit_factor,
+   880     max_drawdown, max_drawdown_pct, sharpe, avg_pnl, avg_winner, avg_loser.
+   881     """
+   882     if not trades:
+   883         return {
+   884             "total_trades": 0, "net_pnl": 0.0, "win_rate": 0.0,
+   885             "profit_factor": 0.0, "max_drawdown": 0.0,
+   886             "max_drawdown_pct": 0.0, "sharpe": 0.0,
+   887             "avg_pnl": 0.0, "avg_winner": 0.0, "avg_loser": 0.0,
+   888         }
+   889
+   890     pnls = [t["pnl"] for t in trades]
+   891     winners = [p for p in pnls if p > 0]
+   892     losers = [p for p in pnls if p < 0]
+   893
+   894     gross_profit = sum(winners)
+   895     gross_loss = abs(sum(losers))
+   896
+   897     # Equity curve for drawdown
+   898     equity = [starting_equity]
+   899     for p in pnls:
+   900         equity.append(equity[-1] + p)
+   901
+   902     peak = equity[0]
+   903     max_dd = 0.0
+   904     for e in equity[1:]:
+   905         if e > peak:
+   906             peak = e
+   907         dd = peak - e
+   908         if dd > max_dd:
+   909             max_dd = dd
+   910
+   911     # Sharpe (annualized, assuming ~252 trading days)
+   912     mean_pnl = sum(pnls) / len(pnls)
+   913     if len(pnls) > 1:
+   914         variance = sum((p - mean_pnl) ** 2 for p in pnls) / (len(pnls) - 1)
+   915         std_pnl = math.sqrt(variance)
+   916         sharpe = (mean_pnl / std_pnl) * math.sqrt(252) if std_pnl > 0 else 0.0
+   917     else:
+   918         sharpe = 0.0
+   919
+   920     return {
+   921         "total_trades": len(pnls),
+   922         "net_pnl": sum(pnls),
+   923         "win_rate": len(winners) / len(pnls) if pnls else 0.0,
+   924         "profit_factor": gross_profit / gross_loss if gross_loss > 0 else float("inf"),
+   925         "max_drawdown": max_dd,
+   926         "max_drawdown_pct": (max_dd / starting_equity) * 100 if starting_equity > 0 else 0.0,
+   927         "sharpe": round(sharpe, 2),
+   928         "avg_pnl": mean_pnl,
+   929         "avg_winner": sum(winners) / len(winners) if winners else 0.0,
+   930         "avg_loser": sum(losers) / len(losers) if losers else 0.0,
+   931     }
+   932 ```
+   933
+   934 - [ ] **Step 4: Run test to verify it passes**
+   935
+   936 Run: `python -m pytest v11/tests/test_replay_metrics.py -v`
+   937 Expected: All 5 tests PASS
+   938
+   939 - [ ] **Step 5: Commit**
+   940
+   941 ```bash
+   942 git add v11/replay/metrics.py v11/tests/test_replay_metrics.py
+   943 git commit -m "feat(replay): add metrics computation for replay results"
+   944 ```
+   945
+   946 ---
+   947
+   948 ### Task 5: ReplayRunner
+   949
+   950 The core component. Assembles existing live components and drives them with historical data.
+   951
+   952 **Files:**
+   953 - Create: `v11/replay/replay_runner.py`
+   954 - Test: `v11/tests/test_replay_runner.py`
+   955
+   956 **Dependencies:** Tasks 1-4 must be complete.
+   957
+   958 - [ ] **Step 1: Write failing integration test**
+   959
+   960 ```python
+   961 # v11/tests/test_replay_runner.py
+   962 """Integration tests for ReplayRunner — full pipeline on synthetic data."""
+   963 import asyncio
+   964 from datetime import datetime, timedelta
+   965
+   966 import pytest
+   967
+   968 from v11.core.types import Bar
+   969 from v11.replay.config import ReplayConfig
+   970 from v11.replay.replay_runner import ReplayRunner
+   971
+   972
+   973 def _make_bars(n=600, start_price=1.1000, start_time=None):
+   974     """Generate n synthetic 1-min bars with a consolidation pattern.
+   975
+   976     Creates bars with slight variation to exercise strategy engines
+   977     without necessarily triggering a full Darvas box (that depends
+   978     on parameter tuning). The goal is pipeline smoke-testing.
+   979     """
+   980     if start_time is None:
+   981         # Monday 8:00 UTC (London session)
+   982         start_time = datetime(2025, 1, 6, 8, 0, 0)
+   983
+   984     bars = []
+   985     price = start_price
+   986     for i in range(n):
+   987         ts = start_time + timedelta(minutes=i)
+   988         # Oscillate around start_price with small moves
+   989         delta = 0.0001 * ((i % 7) - 3)
+   990         price = start_price + delta
+   991
+   992         bars.append(Bar(
+   993             timestamp=ts,
+   994             open=price - 0.00005,
+   995             high=price + 0.0002,
+   996             low=price - 0.0003,
+   997             close=price,
+   998             tick_count=50,
+   999             buy_volume=60.0 if i % 3 == 0 else 40.0,
+  1000             sell_volume=40.0 if i % 3 == 0 else 50.0,
+  1001         ))
+  1002     return bars
+  1003
+  1004
+  1005 class TestReplayRunnerBasic:
+  1006     def test_replay_completes_without_error(self, tmp_path):
+  1007         """Smoke test: replay processes bars without crashing."""
+  1008         config = ReplayConfig(
+  1009             instruments=["EURUSD"],
+  1010             start_date="2025-01-06",
+  1011             end_date="2025-01-06",
+  1012             llm_mode="passthrough",
+  1013             output_dir=str(tmp_path / "results"),
+  1014             event_verbosity="quiet",
+  1015         )
+  1016         runner = ReplayRunner(config)
+  1017         bars_by_instrument = {"EURUSD": _make_bars(600)}
+  1018
+  1019         result = asyncio.get_event_loop().run_until_complete(
+  1020             runner.run(bars_by_instrument))
+  1021
+  1022         assert result["bars_processed"]["EURUSD"] > 0
+  1023         assert "error" not in result
+  1024
+  1025     def test_replay_produces_event_log(self, tmp_path):
+  1026         """Event log file is created with at least one event."""
+  1027         config = ReplayConfig(
+  1028             instruments=["EURUSD"],
+  1029             start_date="2025-01-06",
+  1030             end_date="2025-01-06",
+  1031             llm_mode="passthrough",
+  1032             output_dir=str(tmp_path / "results"),
+  1033             event_verbosity="quiet",
+  1034         )
+  1035         runner = ReplayRunner(config)
+  1036         bars_by_instrument = {"EURUSD": _make_bars(600)}
+  1037
+  1038         asyncio.get_event_loop().run_until_complete(
+  1039             runner.run(bars_by_instrument))
+  1040
+  1041         event_file = tmp_path / "results" / "replay_events.jsonl"
+  1042         assert event_file.exists()
+  1043         content = event_file.read_text()
+  1044         assert len(content.strip()) > 0
+  1045
+  1046     def test_replay_seeds_initial_bars(self, tmp_path):
+  1047         """First seed_bars are used for seeding, not replay."""
+  1048         config = ReplayConfig(
+  1049             instruments=["EURUSD"],
+  1050             start_date="2025-01-06",
+  1051             end_date="2025-01-06",
+  1052             llm_mode="passthrough",
+  1053             output_dir=str(tmp_path / "results"),
+  1054             event_verbosity="quiet",
+  1055             seed_bars=100,
+  1056         )
+  1057         runner = ReplayRunner(config)
+  1058         all_bars = _make_bars(200)
+  1059         bars_by_instrument = {"EURUSD": all_bars}
+  1060
+  1061         result = asyncio.get_event_loop().run_until_complete(
+  1062             runner.run(bars_by_instrument))
+  1063
+  1064         # 200 total bars, 100 seeded = 100 replayed
+  1065         assert result["bars_processed"]["EURUSD"] == 100
+  1066 ```
+  1067
+  1068 - [ ] **Step 2: Run test to verify it fails**
+  1069
+  1070 Run: `python -m pytest v11/tests/test_replay_runner.py -v`
+  1071 Expected: ImportError
+  1072
+  1073 - [ ] **Step 3: Implement ReplayRunner**
+  1074
+  1075 ```python
+  1076 # v11/replay/replay_runner.py
+  1077 """ReplayRunner — Feed historical bars through live strategy engines.
+  1078
+  1079 Reuses InstrumentEngine, LevelRetestEngine, RiskManager, TradeManager
+  1080 exactly as the live system does. Replaces IBKR with stub connection
+  1081 and BarAggregator with direct bar injection.
+  1082 """
+  1083 from __future__ import annotations
+  1084
+  1085 import asyncio
+  1086 import logging
+  1087 from datetime import datetime
+  1088 from pathlib import Path
+  1089 from typing import Dict, List, Optional
+  1090
+  1091 from ..core.types import Bar
+  1092 from ..config.strategy_config import StrategyConfig, EURUSD_CONFIG, USDJPY_CONFIG, XAUUSD_CONFIG
+  1093 from ..config.live_config import (
+  1094     LiveConfig, InstrumentConfig,
+  1095     EURUSD_INSTRUMENT, USDJPY_INSTRUMENT, XAUUSD_INSTRUMENT,
+  1096 )
+  1097 from ..execution.trade_manager import TradeManager
+  1098 from ..live.live_engine import InstrumentEngine
+  1099 from ..live.level_retest_engine import LevelRetestEngine
+  1100 from ..live.risk_manager import RiskManager
+  1101 from ..llm.passthrough_filter import PassthroughFilter
+  1102
+  1103 from .config import ReplayConfig
+  1104 from .stub_connection import StubIBKRConnection
+  1105 from .cached_filter import CachedFilter
+  1106 from .event_logger import EventLogger
+  1107 from .metrics import compute_metrics
+  1108
+  1109 log = logging.getLogger("v11_replay")
+  1110
+  1111 # Map instrument names to configs
+  1112 STRATEGY_CONFIGS = {
+  1113     "EURUSD": EURUSD_CONFIG,
+  1114     "USDJPY": USDJPY_CONFIG,
+  1115     "XAUUSD": XAUUSD_CONFIG,
+  1116 }
+  1117
+  1118 INSTRUMENT_CONFIGS = {
+  1119     "EURUSD": EURUSD_INSTRUMENT,
+  1120     "USDJPY": USDJPY_INSTRUMENT,
+  1121     "XAUUSD": XAUUSD_INSTRUMENT,
+  1122 }
+  1123
+  1124
+  1125 class ReplayRunner:
+  1126     """Replays historical bars through the live strategy pipeline.
+  1127
+  1128     Usage:
+  1129         runner = ReplayRunner(config)
+  1130         result = await runner.run(bars_by_instrument)
+  1131     """
+  1132
+  1133     def __init__(self, config: ReplayConfig):
+  1134         self._config = config
+  1135         config.validate()
+  1136
+  1137         # Output directory
+  1138         self._output_dir = Path(config.output_dir)
+  1139         self._output_dir.mkdir(parents=True, exist_ok=True)
+  1140
+  1141         # Stub connection (TradeManager never uses it in dry_run)
+  1142         self._conn = StubIBKRConnection()
+  1143
+  1144         # LLM filter
+  1145         self._llm_filter = self._build_llm_filter()
+  1146
+  1147         # Live config (controls thresholds, buffer sizes, etc.)
+  1148         self._live_config = LiveConfig(
+  1149             dry_run=True,
+  1150             llm_confidence_threshold=config.llm_confidence_threshold,
+  1151             max_daily_trades=config.max_daily_trades,
+  1152             max_daily_loss=config.max_daily_loss,
+  1153             max_concurrent_positions=config.max_concurrent_positions,
+  1154         )
+  1155
+  1156         # Risk manager
+  1157         self._risk_manager = RiskManager(
+  1158             max_daily_loss=config.max_daily_loss,
+  1159             max_daily_trades_per_strategy=config.max_daily_trades,
+  1160             max_concurrent_positions=config.max_concurrent_positions,
+  1161             log=log,
+  1162         )
+  1163
+  1164         # Event logger
+  1165         self._event_logger = EventLogger(
+  1166             output_path=str(self._output_dir / "replay_events.jsonl"),
+  1167             verbosity=config.event_verbosity,
+  1168         )
+  1169
+  1170         # Per-instrument engines (built in run())
+  1171         self._engines: Dict[str, List] = {}  # pair -> [engine, ...]
+  1172         self._trade_managers: Dict[str, TradeManager] = {}
+  1173
+  1174     def _build_llm_filter(self):
+  1175         """Build LLM filter based on config mode."""
+  1176         if self._config.llm_mode == "passthrough":
+  1177             return PassthroughFilter()
+  1178
+  1179         if self._config.llm_mode == "cached":
+  1180             inner = None
+  1181             if self._config.grok_api_key:
+  1182                 from ..llm.grok_filter import GrokFilter
+  1183                 inner = GrokFilter(
+  1184                     api_key=self._config.grok_api_key,
+  1185                     model=self._config.grok_model,
+  1186                 )
+  1187             return CachedFilter(
+  1188                 inner_filter=inner,
+  1189                 cache_path=self._config.llm_cache_path,
+  1190             )
+  1191
+  1192         if self._config.llm_mode == "live":
+  1193             from ..llm.grok_filter import GrokFilter
+  1194             return GrokFilter(
+  1195                 api_key=self._config.grok_api_key,
+  1196                 model=self._config.grok_model,
+  1197             )
+  1198
+  1199         return PassthroughFilter()
+  1200
+  1201     def _build_engines(self, instrument: str) -> List:
+  1202         """Create Darvas + LevelRetest engines for one instrument."""
+  1203         strategy_config = STRATEGY_CONFIGS.get(instrument)
+  1204         inst_config = INSTRUMENT_CONFIGS.get(instrument)
+  1205         if strategy_config is None or inst_config is None:
+  1206             raise ValueError(f"No config for instrument: {instrument}")
+  1207
+  1208         trade_manager = TradeManager(
+  1209             conn=self._conn,
+  1210             inst=inst_config,
+  1211             log=log,
+  1212             trade_log_dir=self._output_dir / "trades",
+  1213             dry_run=True,
+  1214         )
+  1215         self._trade_managers[instrument] = trade_manager
+  1216
+  1217         darvas = InstrumentEngine(
+  1218             strategy_config=strategy_config,
+  1219             inst_config=inst_config,
+  1220             llm_filter=self._llm_filter,
+  1221             trade_manager=trade_manager,
+  1222             live_config=self._live_config,
+  1223             log=log,
+  1224         )
+  1225         darvas.strategy_name = "Darvas_Breakout"
+  1226         darvas._risk_check = self._risk_manager.can_trade
+  1227
+  1228         retest = LevelRetestEngine(
+  1229             strategy_config=strategy_config,
+  1230             inst_config=inst_config,
+  1231             llm_filter=self._llm_filter,
+  1232             trade_manager=trade_manager,
+  1233             live_config=self._live_config,
+  1234             log=log,
+  1235         )
+  1236         retest._risk_check = self._risk_manager.can_trade
+  1237
+  1238         return [darvas, retest]
+  1239
+  1240     async def run(self, bars_by_instrument: Dict[str, List[Bar]]) -> dict:
+  1241         """Run the full replay.
+  1242
+  1243         Args:
+  1244             bars_by_instrument: {"EURUSD": [Bar, ...], "USDJPY": [Bar, ...]}
+  1245
+  1246         Returns:
+  1247             Summary dict with bars_processed, trade_count, metrics, etc.
+  1248         """
+  1249         result = {"bars_processed": {}, "trades": [], "metrics": {}}
+  1250
+  1251         # Build engines for each instrument
+  1252         for instrument in self._config.instruments:
+  1253             if instrument not in bars_by_instrument:
+  1254                 log.warning(f"No bars provided for {instrument}, skipping")
+  1255                 continue
+  1256             self._engines[instrument] = self._build_engines(instrument)
+  1257
+  1258         # Process each instrument
+  1259         for instrument, bars in bars_by_instrument.items():
+  1260             if instrument not in self._engines:
+  1261                 continue
+  1262
+  1263             engines = self._engines[instrument]
+  1264             seed_count = min(self._config.seed_bars, len(bars))
+  1265             replay_bars = bars[seed_count:]
+  1266
+  1267             log.info(f"Replay {instrument}: {len(bars)} total bars, "
+  1268                      f"{seed_count} seeded, {len(replay_bars)} replayed")
+  1269
+  1270             # Seed historical bars
+  1271             for bar in bars[:seed_count]:
+  1272                 for engine in engines:
+  1273                     engine.add_historical_bar(bar)
+  1274
+  1275             self._event_logger.emit(
+  1276                 "SESSION_START", strategy="ALL", instrument=instrument,
+  1277                 timestamp=replay_bars[0].timestamp.isoformat() if replay_bars else "",
+  1278                 data={"total_bars": len(bars), "seed_bars": seed_count,
+  1279                       "replay_bars": len(replay_bars)},
+  1280             )
+  1281
+  1282             # Track current date for daily resets
+  1283             current_date: Optional[str] = None
+  1284
+  1285             # Replay loop
+  1286             for i, bar in enumerate(replay_bars):
+  1287                 bar_date = bar.timestamp.strftime("%Y-%m-%d")
+  1288
+  1289                 # Daily reset on date change
+  1290                 if current_date is not None and bar_date != current_date:
+  1291                     self._risk_manager.reset_daily()
+  1292                     tm = self._trade_managers[instrument]
+  1293                     tm.reset_daily()
+  1294                     self._event_logger.emit(
+  1295                         "DAILY_RESET", strategy="ALL", instrument=instrument,
+  1296                         timestamp=bar.timestamp.isoformat(), data={},
+  1297                     )
+  1298                 current_date = bar_date
+  1299
+  1300                 # Feed price to engines (slippage tracking)
+  1301                 for engine in engines:
+  1302                     engine.on_price(bar.close, bar.timestamp)
+  1303
+  1304                 # Process the bar through all engines
+  1305                 for engine in engines:
+  1306                     tm = self._trade_managers[instrument]
+  1307                     was_in_trade = tm.in_trade
+  1308                     pnl_before = tm.daily_pnl
+  1309                     trades_before = tm.daily_trades
+  1310
+  1311                     await engine.on_bar(bar)
+  1312
+  1313                     # Detect trade entry
+  1314                     if not was_in_trade and tm.in_trade:
+  1315                         self._event_logger.emit(
+  1316                             "TRADE_ENTERED", strategy=engine.strategy_name,
+  1317                             instrument=instrument,
+  1318                             timestamp=bar.timestamp.isoformat(),
+  1319                             data={
+  1320                                 "direction": tm.direction.value if tm.direction else "?",
+  1321                                 "entry_price": tm.signal_entry_price,
+  1322                                 "stop_price": tm.stop_price,
+  1323                                 "target_price": tm.target_price,
+  1324                                 "llm_confidence": tm.llm_confidence,
+  1325                             },
+  1326                         )
+  1327
+  1328                     # Detect trade exit (daily_trades counter incremented)
+  1329                     if tm.daily_trades > trades_before:
+  1330                         pnl_delta = tm.daily_pnl - pnl_before
+  1331                         self._event_logger.emit(
+  1332                             "TRADE_EXITED", strategy=engine.strategy_name,
+  1333                             instrument=instrument,
+  1334                             timestamp=bar.timestamp.isoformat(),
+  1335                             data={
+  1336                                 "instrument": instrument,
+  1337                                 "strategy": engine.strategy_name,
+  1338                                 "pnl": pnl_delta,
+  1339                                 "exit_reason": "check_exit",
+  1340                                 "hold_bars": 0,
+  1341                                 "llm_confidence": 0,
+  1342                             },
+  1343                         )
+  1344
+  1345                 # Progress logging every 10000 bars
+  1346                 if (i + 1) % 10000 == 0:
+  1347                     log.info(f"Replay {instrument}: {i + 1}/{len(replay_bars)} bars")
+  1348
+  1349             result["bars_processed"][instrument] = len(replay_bars)
+  1350
+  1351         # Save LLM cache if applicable
+  1352         if isinstance(self._llm_filter, CachedFilter):
+  1353             self._llm_filter.save()
+  1354
+  1355         # Compute metrics from trade records
+  1356         result["event_counts"] = self._event_logger.get_counts()
+  1357         result["trade_records"] = self._event_logger.trade_records
+  1358         result["metrics"] = compute_metrics(self._event_logger.trade_records)
+  1359
+  1360         # Write summary
+  1361         self._write_summary(result)
+  1362         self._event_logger.close()
+  1363
+  1364         return result
+  1365
+  1366     def _write_summary(self, result: dict) -> None:
+  1367         """Write human-readable summary file."""
+  1368         summary_path = self._output_dir / "replay_summary.txt"
+  1369         m = result["metrics"]
+  1370         counts = result.get("event_counts", {})
+  1371
+  1372         lines = [
+  1373             f"Replay: {', '.join(self._config.instruments)} "
+  1374             f"{self._config.start_date} to {self._config.end_date} "
+  1375             f"(LLM: {self._config.llm_mode})",
+  1376             "",
+  1377         ]
+  1378
+  1379         for inst, n in result.get("bars_processed", {}).items():
+  1380             lines.append(f"  {inst}: {n} bars replayed")
+  1381         lines.append("")
+  1382
+  1383         lines.append(f"Events: {dict(counts)}")
+  1384         lines.append("")
+  1385
+  1386         lines.append("Metrics:")
+  1387         lines.append(f"  Total trades: {m['total_trades']}")
+  1388         lines.append(f"  Net PnL: ${m['net_pnl']:+.2f}")
+  1389         lines.append(f"  Win rate: {m['win_rate']:.1%}")
+  1390         lines.append(f"  Profit factor: {m['profit_factor']:.2f}")
+  1391         lines.append(f"  Sharpe: {m['sharpe']:.2f}")
+  1392         lines.append(f"  Max drawdown: ${m['max_drawdown']:.2f} ({m['max_drawdown_pct']:.1f}%)")
+  1393         lines.append(f"  Avg winner: ${m['avg_winner']:+.2f}")
+  1394         lines.append(f"  Avg loser: ${m['avg_loser']:+.2f}")
+  1395
+  1396         summary_path.write_text("\n".join(lines))
+  1397         log.info(f"Summary written to {summary_path}")
+  1398         print("\n" + "\n".join(lines))
+  1399 ```
+  1400
+  1401 - [ ] **Step 4: Run test to verify it passes**
+  1402
+  1403 Run: `python -m pytest v11/tests/test_replay_runner.py -v`
+  1404 Expected: All 3 tests PASS
+  1405
+  1406 - [ ] **Step 5: Run full test suite**
+  1407
+  1408 Run: `python -m pytest v11/tests/ -v --tb=short`
+  1409 Expected: All existing tests still pass, all new tests pass
+  1410
+  1411 - [ ] **Step 6: Commit**
+  1412
+  1413 ```bash
+  1414 git add v11/replay/replay_runner.py v11/tests/test_replay_runner.py
+  1415 git commit -m "feat(replay): add ReplayRunner — main replay loop with engine assembly"
+  1416 ```
+  1417
+  1418 ---
+  1419
+  1420 ### Task 6: CLI Entry Point
+  1421
+  1422 **Files:**
+  1423 - Create: `v11/replay/run_replay.py`
+  1424
+  1425 - [ ] **Step 1: Implement the CLI**
+  1426
+  1427 ```python
+  1428 # v11/replay/run_replay.py
+  1429 """CLI entry point for historical replay.
+  1430
+  1431 Usage:
+  1432     python -m v11.replay.run_replay --instrument EURUSD --start 2025-01-01 --end 2025-03-31
+  1433     python -m v11.replay.run_replay --instrument EURUSD USDJPY --start 2025-01-01 --end 2025-03-31 --llm cached
+  1434 """
+  1435 from __future__ import annotations
+  1436
+  1437 import argparse
+  1438 import asyncio
+  1439 import logging
+  1440 import sys
+  1441 from datetime import datetime
+  1442
+  1443 from ..backtest.data_loader import load_instrument_bars
+  1444 from .config import ReplayConfig
+  1445 from .replay_runner import ReplayRunner
+  1446
+  1447
+  1448 def setup_logging(verbosity: str) -> None:
+  1449     level = logging.DEBUG if verbosity == "verbose" else logging.INFO
+  1450     logging.basicConfig(
+  1451         level=level,
+  1452         format="%(asctime)s %(name)s %(levelname)s %(message)s",
+  1453         datefmt="%H:%M:%S",
+  1454     )
+  1455     # Quiet noisy loggers
+  1456     logging.getLogger("openai").setLevel(logging.WARNING)
+  1457     logging.getLogger("httpx").setLevel(logging.WARNING)
+  1458
+  1459
+  1460 def parse_args() -> argparse.Namespace:
+  1461     p = argparse.ArgumentParser(
+  1462         description="Replay historical bars through V11 live strategy code")
+  1463
+  1464     p.add_argument("--instrument", nargs="+", required=True,
+  1465                    help="Instruments to replay (e.g. EURUSD USDJPY)")
+  1466     p.add_argument("--start", required=True,
+  1467                    help="Start date (YYYY-MM-DD)")
+  1468     p.add_argument("--end", required=True,
+  1469                    help="End date (YYYY-MM-DD)")
+  1470     p.add_argument("--llm", default="passthrough",
+  1471                    choices=["passthrough", "live", "cached"],
+  1472                    help="LLM filter mode (default: passthrough)")
+  1473     p.add_argument("--grok-key", default="",
+  1474                    help="Grok API key (required if --llm is live or cached)")
+  1475     p.add_argument("--verbosity", default="normal",
+  1476                    choices=["quiet", "normal", "verbose"],
+  1477                    help="Console output verbosity")
+  1478     p.add_argument("--output-dir", default="v11/replay/results",
+  1479                    help="Output directory for results")
+  1480     p.add_argument("--seed-bars", type=int, default=500,
+  1481                    help="Bars to seed before replay starts")
+  1482     p.add_argument("--confidence", type=int, default=75,
+  1483                    help="LLM confidence threshold")
+  1484
+  1485     return p.parse_args()
+  1486
+  1487
+  1488 def main() -> None:
+  1489     args = parse_args()
+  1490     setup_logging(args.verbosity)
+  1491     log = logging.getLogger("v11_replay")
+  1492
+  1493     config = ReplayConfig(
+  1494         instruments=[i.upper() for i in args.instrument],
+  1495         start_date=args.start,
+  1496         end_date=args.end,
+  1497         llm_mode=args.llm,
+  1498         grok_api_key=args.grok_key,
+  1499         llm_confidence_threshold=args.confidence,
+  1500         output_dir=args.output_dir,
+  1501         event_verbosity=args.verbosity,
+  1502         seed_bars=args.seed_bars,
+  1503     )
+  1504
+  1505     print(f"Replay: {', '.join(config.instruments)} "
+  1506           f"from {config.start_date} to {config.end_date} "
+  1507           f"(LLM: {config.llm_mode})")
+  1508     print()
+  1509
+  1510     # Load historical data
+  1511     bars_by_instrument = {}
+  1512     for instrument in config.instruments:
+  1513         start_dt = datetime.strptime(config.start_date, "%Y-%m-%d")
+  1514         end_dt = datetime.strptime(config.end_date, "%Y-%m-%d")
+  1515
+  1516         log.info(f"Loading {instrument} bars from {config.start_date} to {config.end_date}...")
+  1517         bars = load_instrument_bars(instrument, start=start_dt, end=end_dt)
+  1518         log.info(f"Loaded {len(bars)} bars for {instrument}")
+  1519
+  1520         if len(bars) < config.seed_bars + 100:
+  1521             log.error(f"{instrument}: only {len(bars)} bars, need at least "
+  1522                       f"{config.seed_bars + 100} (seed + 100 replay). Skipping.")
+  1523             continue
+  1524
+  1525         bars_by_instrument[instrument] = bars
+  1526
+  1527     if not bars_by_instrument:
+  1528         log.error("No instruments with sufficient data. Exiting.")
+  1529         sys.exit(1)
+  1530
+  1531     # Run replay
+  1532     runner = ReplayRunner(config)
+  1533     result = asyncio.get_event_loop().run_until_complete(
+  1534         runner.run(bars_by_instrument))
+  1535
+  1536     # Print final stats
+  1537     m = result.get("metrics", {})
+  1538     print(f"\nDone. {m.get('total_trades', 0)} trades, "
+  1539           f"PnL=${m.get('net_pnl', 0):+.2f}")
+  1540
+  1541
+  1542 if __name__ == "__main__":
+  1543     main()
+  1544 ```
+  1545
+  1546 - [ ] **Step 2: Verify it runs with --help**
+  1547
+  1548 Run: `python -m v11.replay.run_replay --help`
+  1549 Expected: Shows usage with all arguments listed
+  1550
+  1551 - [ ] **Step 3: Commit**
+  1552
+  1553 ```bash
+  1554 git add v11/replay/run_replay.py
+  1555 git commit -m "feat(replay): add CLI entry point run_replay.py"
+  1556 ```
+  1557
+  1558 ---
+  1559
+  1560 ### Task 7: Integration Test with Real Data
+  1561
+  1562 Manual verification against actual historical data.
+  1563
+  1564 **Dependencies:** Tasks 1-6 must be complete.
+  1565
+  1566 - [ ] **Step 1: Run a 1-week replay on EURUSD (passthrough)**
+  1567
+  1568 ```bash
+  1569 python -m v11.replay.run_replay --instrument EURUSD --start 2025-01-06 --end 2025-01-10 --llm passthrough --verbosity
+        verbose
+  1570 ```
+  1571
+  1572 Expected: Completes without errors. Check `v11/replay/results/`:
+  1573 - `replay_events.jsonl` — SESSION_START events, possibly BOX_FORMED / BREAKOUT_DETECTED
+  1574 - `replay_summary.txt` — bars processed count
+  1575 - Console shows progress and events
+  1576
+  1577 - [ ] **Step 2: Run a 3-month replay to get actual trades**
+  1578
+  1579 ```bash
+  1580 python -m v11.replay.run_replay --instrument EURUSD --start 2025-01-01 --end 2025-03-31 --llm passthrough --verbosity
+        normal
+  1581 ```
+  1582
+  1583 Expected: Completes without errors. Should produce some trades. Check:
+  1584 - Trade CSV in `v11/replay/results/trades/trades_eurusd.csv`
+  1585 - Event log has TRADE_ENTERED and TRADE_EXITED events
+  1586 - Summary shows trade count, win rate, PnL
+  1587
+  1588 - [ ] **Step 3: Verify event log against expectations**
+  1589
+  1590 Open `replay_events.jsonl` and spot-check:
+  1591 - Session starts at reasonable times
+  1592 - Boxes form with sensible top/bottom prices
+  1593 - Breakouts occur after boxes
+  1594 - Trade entries have SL below entry (for longs)
+  1595
+  1596 - [ ] **Step 4: Run multi-instrument replay**
+  1597
+  1598 ```bash
+  1599 python -m v11.replay.run_replay --instrument EURUSD USDJPY --start 2025-01-01 --end 2025-03-31 --llm passthrough --ve
+       rbosity normal
+  1600 ```
+  1601
+  1602 Expected: Both instruments process, risk manager tracks combined positions.
+  1603
+  1604 - [ ] **Step 5: Add results gitignore and commit**
+  1605
+  1606 ```bash
+  1607 echo "*" > v11/replay/results/.gitignore
+  1608 echo "!.gitignore" >> v11/replay/results/.gitignore
+  1609 git add v11/replay/results/.gitignore
+  1610 git commit -m "chore(replay): gitignore results directory"
+  1609 git add v11/replay/results/.gitignore
+  1610 git commit -m "chore(replay): gitignore results directory"
+  1611 ```
+  1612
+  1613 ---
+  1614
+  1615 ### Task 8: Run Full Test Suite and Final Commit
+  1616
+  1617 - [ ] **Step 1: Run all tests**
+  1618
+  1619 ```bash
+  1620 python -m pytest v11/tests/ -v --tb=short
+  1621 ```
+  1622
+  1623 Expected: All existing tests pass + all new replay tests pass.
+  1624
+  1625 - [ ] **Step 2: Verify no production code was modified**
+  1626
+  1627 ```bash
+  1628 git diff HEAD~8 -- v11/core/ v11/execution/ v11/live/ v11/config/ v11/llm/
+  1629 ```
+  1630
+  1631 Expected: Empty diff — zero changes to production code. All new code is in `v11/replay/` and `v11/tests/`.
