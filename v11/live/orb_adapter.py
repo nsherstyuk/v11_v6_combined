@@ -261,13 +261,27 @@ class ORBAdapter:
     def get_status(self) -> dict:
         """Diagnostic status snapshot."""
         s = self._strategy
+        cfg = self._v6_config
+
+        # Current price from tick stream
+        current_price = None
+        if self._context._last_bid and self._context._last_ask:
+            current_price = (self._context._last_bid + self._context._last_ask) / 2
+
+        # Distance to range boundaries (if range exists and we have price)
+        dist_to_high = None
+        dist_to_low = None
+        if s.range and current_price:
+            dist_to_high = current_price - s.range.high
+            dist_to_low = current_price - s.range.low
+
         return {
             "strategy_name": self.STRATEGY_NAME,
             "pair_name": self._instrument,
             "instrument": self._instrument,
             "state": s.state.value,
-            "range": (f"{s.range.low:.{self._v6_config.price_decimals}f}-"
-                      f"{s.range.high:.{self._v6_config.price_decimals}f}"
+            "range": (f"{s.range.low:.{cfg.price_decimals}f}-"
+                      f"{s.range.high:.{cfg.price_decimals}f}"
                       if s.range else None),
             "in_trade": self.in_trade,
             "direction": s.direction,
@@ -277,6 +291,15 @@ class ORBAdapter:
             "range_calculated": self._range_calculated,
             "gap_calculated": self._gap_calculated,
             "current_date": self._current_date,
+            "current_price": current_price,
+            "dist_to_high": dist_to_high,
+            "dist_to_low": dist_to_low,
+            "range_start_hour": cfg.range_start_hour,
+            "range_end_hour": cfg.range_end_hour,
+            "trade_end_hour": cfg.trade_end_hour,
+            "llm_evaluated": self._llm_evaluated_today,
+            "llm_gate_pending": self._llm_gate_pending,
+            "llm_threshold": self._llm_confidence_threshold,
         }
 
     # ── Fill callback (from V6 execution engine) ──────────────────

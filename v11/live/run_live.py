@@ -459,6 +459,7 @@ class V11LiveTrader:
 
     def _log_status(self) -> None:
         """Log status for all strategies and risk manager."""
+        now_utc = datetime.now(timezone.utc)
         status = self.runner.get_all_status()
         risk = status['risk']
         self.log.info(
@@ -468,35 +469,91 @@ class V11LiveTrader:
             f"/{self.live_cfg.max_concurrent_positions}")
         for s in status['strategies']:
             extra = ""
+            proximity = ""
             name = s.get('strategy_name', '?')
             if name == 'V6_ORB':
-                extra = (f" state={s.get('state', '?')}"
-                         f" range={s.get('range', 'none')}"
-                         f" range_calc={s.get('range_calculated', '?')}")
+                state = s.get('state', '?')
+                rng = s.get('range')
+                extra = f" state={state} range={rng or 'none'}"
+
+                # ORB proximity / schedule info
+                price = s.get('current_price')
+                range_end = s.get('range_end_hour', 6)
+                trade_end = s.get('trade_end_hour', 16)
+                llm_done = s.get('llm_evaluated', False)
+                llm_pending = s.get('llm_gate_pending', False)
+                h = now_utc.hour
+
+                if state == 'IDLE' and not s.get('range_calculated'):
+                    if h < range_end:
+                        proximity = f" | WAITING: range calc at {range_end}:00 UTC ({range_end - h}h away)"
+                    else:
+                        proximity = " | range calc pending (waiting for ticks)"
+                elif state == 'IDLE' and s.get('range_calculated') and rng:
+                    proximity = " | range ready, waiting for trade window"
+                elif state == 'RANGE_READY':
+                    if llm_pending:
+                        proximity = " | LLM EVALUATING..."
+                    elif not llm_done:
+                        proximity = " | LLM gate pending (next bar)"
+                    else:
+                        proximity = " | brackets eligible"
+                elif state == 'DONE_TODAY':
+                    if llm_done:
+                        proximity = " | LLM rejected today"
+                    else:
+                        proximity = f" | done (window closes {trade_end}:00 UTC)"
+                elif state in ('ORDERS_PLACED', 'IN_TRADE'):
+                    d2h = s.get('dist_to_high')
+                    d2l = s.get('dist_to_low')
+                    if price and d2h is not None:
+                        proximity = (f" | price={price:.2f}"
+                                     f" dist_high={d2h:+.2f}"
+                                     f" dist_low={d2l:+.2f}")
+
             elif name == 'Darvas_Breakout':
                 box = s.get('active_box')
                 det_state = s.get('detector_state', '?')
                 prog = s.get('formation_progress', {})
                 if box:
                     box_str = f"[{box.bottom:.5f}-{box.top:.5f}]"
+                    # Distance to breakout
+                    last_price = s.get('last_close', 0)
+                    if last_price and box.top:
+                        dist = last_price - box.top
+                        atr = s.get('atr', 0)
+                        dist_atr = f" ({dist/atr:.1f}ATR)" if atr > 0 else ""
+                        sma = s.get('htf_sma')
+                        sma_dir = ""
+                        if sma and last_price:
+                            sma_dir = " SMA:UP" if last_price > sma else " SMA:DOWN"
+                        proximity = (f" | price={last_price:.5f}"
+                                     f" dist_breakout={dist:+.5f}{dist_atr}{sma_dir}")
                 elif det_state == 'CONFIRMING_TOP':
                     box_str = (f"forming top={prog.get('candidate_top', 0):.5f} "
                                f"{prog.get('bars_confirmed', 0)}/{prog.get('bars_needed', 0)}")
+                    bars_left = prog.get('bars_needed', 15) - prog.get('bars_confirmed', 0)
+                    proximity = f" | ~{bars_left} bars to confirm top"
                 elif det_state == 'CONFIRMING_BOTTOM':
                     box_str = (f"top={prog.get('confirmed_top', 0):.5f} "
                                f"bot={prog.get('candidate_bottom', 0):.5f} "
                                f"{prog.get('bars_confirmed', 0)}/{prog.get('bars_needed', 0)}")
+                    bars_left = prog.get('bars_needed', 15) - prog.get('bars_confirmed', 0)
+                    proximity = f" | ~{bars_left} bars to confirm box"
                 elif det_state == 'CONFIRMING_BREAKOUT':
                     box_str = (f"BREAKOUT {prog.get('direction', '?')} "
                                f"{prog.get('confirm_count', 0)}/{prog.get('confirm_needed', 0)}")
+                    proximity = " | BREAKOUT in progress -> LLM gate next"
                 else:
                     box_str = "seeking"
+                    proximity = " | no box forming"
                 sma = s.get('htf_sma')
                 sma_str = f"{sma:.5f}" if sma else "warming"
                 extra = (f" det={det_state}"
                          f" box={box_str}"
                          f" atr={s.get('atr', 0):.5f}"
                          f" sma={sma_str}({s.get('htf_sma_bars', 0)})")
+
             elif name == '4H_Level_Retest':
                 sma = s.get('htf_sma')
                 sma_str = f"{sma:.5f}" if sma else "warming"
@@ -506,8 +563,15 @@ class V11LiveTrader:
                     atr = s.get('atr', 0)
                     nd_atr = f"{nd/atr:.1f}ATR" if atr > 0 else "?"
                     near_str = f" near={nearest.level_type.value}@{nearest.price:.5f}({nd_atr})"
+                    if atr > 0 and nd / atr < 2.0:
+                        proximity = f" | CLOSE to level ({nd_atr} away)"
+                    elif s.get('active_levels', 0) == 0:
+                        proximity = " | no levels detected yet"
+                    else:
+                        proximity = f" | {s.get('active_levels', 0)} levels, nearest {nd_atr} away"
                 else:
                     near_str = ""
+                    proximity = f" | {s.get('active_levels', 0)} levels detected" if s.get('active_levels', 0) else " | no levels yet"
                 buf = s.get('buffer_fill', '?')
                 extra = (f" levels={s.get('active_levels', 0)}"
                          f" pending={s.get('pending_retests', 0)}"
@@ -515,11 +579,42 @@ class V11LiveTrader:
                          f" atr={s.get('atr', 0):.5f}"
                          f" sma={sma_str}({s.get('htf_sma_bars', 0)})"
                          f" htf={s.get('level_htf_bars', 0)}({buf})")
+
             self.log.info(
                 f"[STATUS] {name} "
                 f"on {s.get('pair_name', '?')}: "
                 f"bars={s.get('bar_count', 0)} "
-                f"in_trade={s.get('in_trade', False)}{extra}")
+                f"in_trade={s.get('in_trade', False)}{extra}{proximity}")
+
+        # Last LLM decision summary
+        self._log_last_llm_decision()
+
+    def _log_last_llm_decision(self) -> None:
+        """Log the most recent LLM decision for visibility."""
+        from v11.llm.grok_filter import GrokFilter
+        ledger = None
+        if isinstance(self.llm_filter, GrokFilter) and self.llm_filter._ledger:
+            ledger = self.llm_filter._ledger
+        if not ledger:
+            return
+        all_decisions = ledger.get_all()
+        if not all_decisions:
+            self.log.info("[LLM] No decisions yet (fresh ledger)")
+            return
+        last = all_decisions[0]  # newest first
+        grade = ""
+        if last.outcome.assessed:
+            grade = f" -> {last.outcome.grade}"
+        stats = ledger.stats
+        self.log.info(
+            f"[LLM] Last: {last.strategy} {last.instrument} "
+            f"{last.decision}(conf={last.confidence}){grade} "
+            f"| {last.reasoning[:80]}")
+        self.log.info(
+            f"[LLM] Ledger: {stats['total']} decisions, "
+            f"{stats['assessed']} assessed, "
+            f"accuracy={stats['accuracy_pct']}%"
+            f" (C={stats['correct']} W={stats['wrong']} M={stats['missed']})")
 
     def _check_price_staleness(self) -> None:
         """Check for stale price feeds and log warnings/errors."""

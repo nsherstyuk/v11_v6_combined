@@ -429,6 +429,10 @@ class InstrumentEngine:
 
     def get_status(self) -> dict:
         """Get current engine status for diagnostics."""
+        last_close = 0.0
+        bars = self._buffer.get_bars(1)
+        if bars:
+            last_close = bars[-1].close
         return {
             'strategy_name': self.strategy_name,
             'pair_name': self.pair_name,
@@ -444,4 +448,5 @@ class InstrumentEngine:
             'daily_pnl': self._trade_manager.daily_pnl,
             'htf_sma': self._sma_filter.current_sma if self._sma_filter else None,
             'htf_sma_bars': self._sma_filter.htf_bars_count if self._sma_filter else 0,
+            'last_close': last_close,
         }
