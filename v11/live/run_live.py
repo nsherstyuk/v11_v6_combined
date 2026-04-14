@@ -337,8 +337,20 @@ class V11LiveTrader:
         signal_mod.signal(signal_mod.SIGINT, on_signal)
         signal_mod.signal(signal_mod.SIGTERM, on_signal)
 
-        if not self.conn.connect():
-            self.log.error("Cannot connect to IBKR — exiting")
+        # Initial connection with extended retries (Gateway may still be starting/authenticating)
+        connected = False
+        for startup_attempt in range(6):  # 6 rounds × 3 retries each = up to ~3 minutes
+            if self.conn.connect():
+                connected = True
+                break
+            if startup_attempt < 5:
+                wait = 15
+                self.log.info(
+                    f"Initial connect failed (round {startup_attempt + 1}/6) "
+                    f"— Gateway may still be starting. Retrying in {wait}s...")
+                time.sleep(wait)
+        if not connected:
+            self.log.error("Cannot connect to IBKR after extended retries — exiting")
             return
 
         # Qualify contracts and start price streams
