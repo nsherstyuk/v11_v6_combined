@@ -629,7 +629,10 @@ class V11LiveTrader:
             f" (C={stats['correct']} W={stats['wrong']} M={stats['missed']})")
 
     def _check_price_staleness(self) -> None:
-        """Check for stale price feeds and log warnings/errors."""
+        """Check for stale price feeds and log warnings/errors.
+
+        Escalation: 60s warn → 300s restart stream → 600s emergency shutdown.
+        """
         now = time.time()
         for pair in self._active_pairs:
             last = self._last_price_time.get(pair)
@@ -640,7 +643,13 @@ class V11LiveTrader:
                         f"PRICE STALE: {pair} — no price received since startup")
                 continue
             stale_s = now - last
-            if stale_s > 300:
+            if stale_s > 600:
+                self.log.critical(
+                    f"PRICE DEAD: {pair} — no price for {stale_s:.0f}s "
+                    f"(>600s). Stream restart failed — EMERGENCY SHUTDOWN.")
+                self._emergency_shutdown("price_feed_dead")
+                return
+            elif stale_s > 300:
                 self.log.error(
                     f"PRICE STALE: {pair} — no price for {stale_s:.0f}s "
                     f"(>300s). Attempting market data stream restart.")

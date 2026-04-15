@@ -37,6 +37,9 @@ class IBKRConnection:
     Supports multiple instruments via qualify_contract() per instrument.
     """
 
+    # Max time to tolerate a disconnect before declaring persistent failure
+    MAX_RECONNECT_DURATION = 300  # 5 minutes
+
     def __init__(self, host: str, port: int, client_id: int,
                  log: logging.Logger):
         self.host = host
@@ -46,6 +49,7 @@ class IBKRConnection:
         self.ib = None
         self._connected = False
         self._last_heartbeat = 0.0
+        self._first_disconnect_time: Optional[float] = None  # epoch, None when connected
 
         # Per-instrument state
         self._contracts = {}        # pair_name -> Contract
@@ -80,12 +84,21 @@ class IBKRConnection:
                 return True
 
             except Exception as e:
-                self.log.warning(f"Connect attempt {attempt}/3 failed: {e}")
+                err_type = type(e).__name__
+                err_msg = str(e) or repr(e)
+                self.log.warning(f"Connect attempt {attempt}/3 failed: {err_type}: {err_msg}")
                 if attempt < 3:
                     time.sleep(5 * attempt)
 
         self.log.error("Failed to connect after 3 attempts")
         return False
+
+    @property
+    def persistent_failure(self) -> bool:
+        """True if disconnected for longer than MAX_RECONNECT_DURATION."""
+        if self._first_disconnect_time is None:
+            return False
+        return (time.time() - self._first_disconnect_time) > self.MAX_RECONNECT_DURATION
 
     def ensure_connected(self) -> bool:
         if self.connected:
@@ -97,8 +110,22 @@ class IBKRConnection:
                 except Exception:
                     self._connected = False
             if self._connected:
+                # Clear disconnect timer on successful connection
+                self._first_disconnect_time = None
                 return True
-        self.log.info("Reconnecting...")
+
+        # Track when disconnect started
+        if self._first_disconnect_time is None:
+            self._first_disconnect_time = time.time()
+
+        elapsed = time.time() - self._first_disconnect_time
+        if elapsed > self.MAX_RECONNECT_DURATION:
+            self.log.critical(
+                f"IBKR disconnected for {elapsed:.0f}s "
+                f"(>{self.MAX_RECONNECT_DURATION}s) — PERSISTENT FAILURE")
+            return False
+
+        self.log.info(f"Reconnecting... (disconnected {elapsed:.0f}s)")
         ok = self.connect()
         if ok:
             # Re-qualify all contracts and restart streams after reconnection
@@ -327,6 +354,8 @@ class IBKRConnection:
 
     def _on_disconnect(self):
         self._connected = False
+        if self._first_disconnect_time is None:
+            self._first_disconnect_time = time.time()
         self.log.warning("IBKR disconnected")
 
     def _on_error(self, reqId, errorCode, errorString, contract):
@@ -334,6 +363,8 @@ class IBKRConnection:
             return
         if errorCode in _IB_CRITICAL_ERRORS:
             self._connected = False
+            if self._first_disconnect_time is None:
+                self._first_disconnect_time = time.time()
             self.log.error(f"IB critical {errorCode}: {errorString}")
         else:
             if errorCode not in (162,):
