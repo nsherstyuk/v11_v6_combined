@@ -138,6 +138,7 @@ XAUUSD_ORB_CONFIG = V6StrategyConfig(
     velocity_filter_enabled=True,
     velocity_lookback_minutes=3,
     velocity_threshold=168.0,    # P50 from research
+    gap_filter_enabled=True,     # V6-validated: +4.2pp WR, skip low-volatility pre-market days
     qty=1,
     point_value=1.0,
     price_decimals=2,
