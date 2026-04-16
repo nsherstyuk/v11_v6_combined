@@ -154,6 +154,14 @@ class RiskManager:
         """Check if an instrument has an open position from any strategy."""
         return instrument in self._positions
 
+    def get_open_instruments(self) -> set[str]:
+        """Return set of instruments that currently have open positions."""
+        return set(self._positions.keys())
+
+    def get_position_strategy(self, instrument: str) -> str:
+        """Return the strategy name holding a position on instrument, or 'UNKNOWN'."""
+        return self._positions.get(instrument, "UNKNOWN")
+
     def get_strategy_stats(self, strategy_name: str) -> Optional[StrategyStats]:
         """Get daily stats for a strategy. None if strategy not seen."""
         return self._strategies.get(strategy_name)

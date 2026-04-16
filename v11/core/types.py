@@ -234,3 +234,5 @@ class TradeRecord:
     exit_commission: float = 0.0
     entry_slippage: float = 0.0
     exit_slippage: float = 0.0
+    engine_pnl: float = 0.0
+    ibkr_pnl: float = 0.0

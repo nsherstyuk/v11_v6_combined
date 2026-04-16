@@ -64,6 +64,8 @@ def mock_conn():
     conn.connected = True
     conn.get_position_size = MagicMock(return_value=0.0)
     conn.has_position = MagicMock(return_value=False)
+    conn.submit_bracket_order = MagicMock(return_value=(None, None, None))
+    conn.submit_sl_tp_oca = MagicMock(return_value=(None, None))
     return conn
 
 
@@ -378,3 +380,35 @@ class TestCSVLogging:
             header = f.readline().strip()
         for field in TRADE_CSV_FIELDS:
             assert field in header
+
+
+# ── 13. Emergency close logging ──────────────────────────────────────────────
+
+class TestEmergencyClose:
+    def test_emergency_close_logs_trade(self, mock_conn, log, tmp_path):
+        """Emergency close should create a CSV log entry."""
+        mock_conn.submit_bracket_order.return_value = (None, None, None)
+        tm = TradeManager(
+            conn=mock_conn, inst=EURUSD_INSTRUMENT, log=log,
+            trade_log_dir=tmp_path, dry_run=True, max_hold_bars=120,
+        )
+        tm.enter_trade(_make_signal(), _make_decision(), 0.6, 100)
+        assert tm.in_trade is True
+        tm.emergency_close("TEST")
+        assert tm.in_trade is False
+        csv_file = tmp_path / f"trades_{EURUSD_INSTRUMENT.pair_name.lower()}.csv"
+        assert csv_file.exists()
+
+    def test_emergency_close_fires_callback(self, mock_conn, log, tmp_path):
+        """Emergency close should fire on_trade_closed callback."""
+        mock_conn.submit_bracket_order.return_value = (None, None, None)
+        tm = TradeManager(
+            conn=mock_conn, inst=EURUSD_INSTRUMENT, log=log,
+            trade_log_dir=tmp_path, dry_run=True, max_hold_bars=120,
+        )
+        records = []
+        tm.on_trade_closed = lambda r: records.append(r)
+        tm.enter_trade(_make_signal(), _make_decision(), 0.6, 100)
+        tm.emergency_close("TEST")
+        assert len(records) == 1
+        assert records[0].exit_reason == "EMERGENCY"

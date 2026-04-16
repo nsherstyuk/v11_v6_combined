@@ -145,7 +145,7 @@ class IBKRConnection:
                         new_ticker = self.ib.reqMktData(
                             contract, '', snapshot=False,
                             regulatorySnapshot=False)
-                        self.ib.sleep(2)
+                        self.sleep(2)
                         self._tickers[pair_name] = new_ticker
                         self.log.info(f"Restarted stream for {pair_name}")
                 except Exception as e:
@@ -177,7 +177,7 @@ class IBKRConnection:
         self.ib.reqMarketDataType(inst.market_data_type)
         ticker = self.ib.reqMktData(
             contract, '', snapshot=False, regulatorySnapshot=False)
-        self.ib.sleep(2)
+        self.sleep(2)
         self._tickers[inst.pair_name] = ticker
         self.log.info(f"Price stream started: {inst.pair_name}")
 
@@ -229,7 +229,7 @@ class IBKRConnection:
         order = MarketOrder(action, quantity)
         trade = self.ib.placeOrder(contract, order)
         self.log.info(f"ORDER SUBMITTED: {pair_name} {action} {quantity} @ MARKET")
-        self.ib.sleep(3)
+        self.sleep(3)
         status = trade.orderStatus.status
         if status not in ('Filled', 'Submitted', 'PreSubmitted'):
             self.log.error(f"ORDER FAILED: {pair_name} {action} {quantity} "
@@ -255,7 +255,7 @@ class IBKRConnection:
         order = StopOrder(action, quantity, stop_price)
         trade = self.ib.placeOrder(contract, order)
         self.log.info(f"SL ORDER: {pair_name} {action} {quantity} @ {stop_price}")
-        self.ib.sleep(3)
+        self.sleep(3)
         status = trade.orderStatus.status
         if status not in ('Filled', 'Submitted', 'PreSubmitted'):
             self.log.error(f"SL ORDER FAILED: {pair_name} {action} {quantity} "
@@ -263,6 +263,142 @@ class IBKRConnection:
             return None
         self.log.info(f"SL ORDER CONFIRMED: {pair_name} status={status}")
         return trade
+
+    def submit_sl_tp_oca(self, pair_name: str, direction: str,
+                         quantity: float, sl_price: float, tp_price: float,
+                         tick_size: float = 0.01):
+        """Submit SL (stop) + TP (limit) as a GTC OCA pair. CENTER: crash-safe exit protection.
+
+        Returns (sl_trade, tp_trade) on success, (None, None) on failure.
+        When one fills IBKR automatically cancels the other (ocaType=1).
+        """
+        from ib_insync import Order
+        from datetime import datetime, timezone
+
+        contract = self._contracts.get(pair_name)
+        if contract is None:
+            self.log.error(f"No contract for {pair_name}")
+            return None, None
+
+        action = "SELL" if direction == "long" else "BUY"
+
+        if tick_size > 0:
+            sl_price = round(round(sl_price / tick_size) * tick_size, 10)
+            tp_price = round(round(tp_price / tick_size) * tick_size, 10)
+
+        now = datetime.now(tz=timezone.utc)
+        oca_group = f"DARVAS_{pair_name}_{now.strftime('%Y%m%d_%H%M%S')}"
+
+        sl_order = Order(
+            action=action, orderType="STP", totalQuantity=quantity,
+            auxPrice=sl_price, tif="GTC",
+            ocaGroup=oca_group, ocaType=1, transmit=False)
+
+        tp_order = Order(
+            action=action, orderType="LMT", totalQuantity=quantity,
+            lmtPrice=tp_price, tif="GTC",
+            ocaGroup=oca_group, ocaType=1, transmit=True)
+
+        try:
+            sl_trade = self.ib.placeOrder(contract, sl_order)
+            self.sleep(1)
+            tp_trade = self.ib.placeOrder(contract, tp_order)
+            self.sleep(2)
+
+            sl_st = sl_trade.orderStatus.status
+            tp_st = tp_trade.orderStatus.status
+            self.log.info(
+                f"SL/TP OCA: SL @ {sl_price} ({sl_st}), "
+                f"TP @ {tp_price} ({tp_st}) OCA={oca_group}")
+
+            if sl_st not in ('Submitted', 'PreSubmitted', 'Filled'):
+                self.log.error(f"SL order status unexpected: {sl_st}")
+                return None, None
+
+            return sl_trade, tp_trade
+
+        except Exception as e:
+            self.log.error(f"submit_sl_tp_oca failed: {e}")
+            return None, None
+
+    def submit_bracket_order(self, pair_name: str, direction: str,
+                             quantity: float, sl_price: float, tp_price: float,
+                             tick_size: float = 0.01):
+        """Submit entry+SL+TP as atomic bracket using IBKR parentId mechanism.
+        CENTER: eliminates naked position window — entry and stops are one unit.
+
+        IBKR holds all three orders until transmit=True on the last child,
+        then activates SL/TP children only after the parent (entry) fills.
+
+        Returns (entry_trade, sl_trade, tp_trade) on success, (None, None, None) on failure.
+        """
+        from ib_insync import Order
+
+        contract = self._contracts.get(pair_name)
+        if contract is None:
+            self.log.error(f"No contract for {pair_name}")
+            return None, None, None
+
+        entry_action = "BUY" if direction == "long" else "SELL"
+        exit_action = "SELL" if direction == "long" else "BUY"
+
+        if tick_size > 0:
+            sl_price = round(round(sl_price / tick_size) * tick_size, 10)
+            tp_price = round(round(tp_price / tick_size) * tick_size, 10)
+
+        # Entry: market order with transmit=False — TWS holds it until final child
+        entry_order = Order(
+            action=entry_action,
+            orderType="MKT",
+            totalQuantity=quantity,
+            transmit=False,
+        )
+
+        try:
+            entry_trade = self.ib.placeOrder(contract, entry_order)
+            self.sleep(0.3)
+            entry_id = entry_order.orderId  # assigned by ib_insync after placeOrder
+
+            sl_order = Order(
+                action=exit_action,
+                orderType="STP",
+                totalQuantity=quantity,
+                auxPrice=sl_price,
+                tif="GTC",
+                parentId=entry_id,
+                transmit=False,
+            )
+            sl_trade = self.ib.placeOrder(contract, sl_order)
+            self.sleep(0.3)
+
+            # transmit=True fires all three orders atomically
+            tp_order = Order(
+                action=exit_action,
+                orderType="LMT",
+                totalQuantity=quantity,
+                lmtPrice=tp_price,
+                tif="GTC",
+                parentId=entry_id,
+                transmit=True,
+            )
+            tp_trade = self.ib.placeOrder(contract, tp_order)
+            self.sleep(3)
+
+            entry_st = entry_trade.orderStatus.status
+            self.log.info(
+                f"BRACKET: {pair_name} {entry_action} {quantity} MKT | "
+                f"SL @ {sl_price} | TP @ {tp_price} | "
+                f"entry_status={entry_st} entry_id={entry_id}")
+
+            if entry_st not in ('Submitted', 'PreSubmitted', 'Filled'):
+                self.log.error(f"BRACKET entry status unexpected: {entry_st}")
+                return None, None, None
+
+            return entry_trade, sl_trade, tp_trade
+
+        except Exception as e:
+            self.log.error(f"submit_bracket_order failed: {e}")
+            return None, None, None
 
     def close_position(self, pair_name: str, direction: str,
                        quantity: float):
@@ -276,7 +412,7 @@ class IBKRConnection:
         order = MarketOrder(action, quantity)
         trade = self.ib.placeOrder(contract, order)
         self.log.info(f"CLOSE: {pair_name} {action} {quantity} @ MARKET")
-        self.ib.sleep(3)
+        self.sleep(3)
         status = trade.orderStatus.status
         if status not in ('Filled', 'Submitted', 'PreSubmitted'):
             self.log.error(f"CLOSE FAILED: {pair_name} {action} {quantity} "
@@ -317,11 +453,68 @@ class IBKRConnection:
             except Exception:
                 pass
 
+    def get_ticker(self, pair_name: str):
+        """Get the current Ticker object for an instrument. Returns None if not streaming."""
+        return self._tickers.get(pair_name)
+
+    def restart_price_stream(self, pair_name: str) -> bool:
+        """Cancel and re-subscribe to market data for an instrument.
+        Returns True on success."""
+        contract = self._contracts.get(pair_name)
+        if contract is None:
+            self.log.error(f"No contract for {pair_name} — cannot restart stream")
+            return False
+        try:
+            try:
+                self.ib.cancelMktData(contract)
+            except Exception:
+                pass
+            ticker = self.ib.reqMktData(
+                contract, '', snapshot=False, regulatorySnapshot=False)
+            self.sleep(2)
+            self._tickers[pair_name] = ticker
+            self.log.info(f"Restarted market data stream for {pair_name}")
+            return True
+        except Exception as e:
+            self.log.error(f"Failed to restart stream for {pair_name}: {e}")
+            return False
+
+    def get_broker_positions(self) -> list:
+        """Get all broker positions. Returns empty list on error."""
+        try:
+            return self.ib.positions()
+        except Exception as e:
+            self.log.error(f"Failed to query broker positions: {e}")
+            return []
+
+    def cancel_orders_for(self, pair_name: str) -> None:
+        """Cancel all open orders for a specific instrument."""
+        contract = self._contracts.get(pair_name)
+        if contract is None:
+            return
+        try:
+            cancelled = 0
+            for trade in self.ib.openTrades():
+                if (trade.contract.symbol == contract.symbol and
+                        trade.contract.secType == contract.secType):
+                    try:
+                        self.ib.cancelOrder(trade.order)
+                        cancelled += 1
+                    except Exception as e:
+                        self.log.warning(
+                            f"cancel_orders_for {pair_name} "
+                            f"order {trade.order.orderId}: {e}")
+            if cancelled:
+                self.log.info(
+                    f"Cancelled {cancelled} open orders for {pair_name}")
+        except Exception as e:
+            self.log.warning(f"cancel_orders_for {pair_name} failed: {e}")
+
     def get_fill_commission(self, trade) -> float:
         """Extract commission from an IBKR trade's fill reports."""
         total = 0.0
         try:
-            self.ib.sleep(1)
+            self.sleep(1)
             for fill in self.ib.fills():
                 if fill.execution.orderId == trade.order.orderId:
                     comm = fill.commissionReport
@@ -332,13 +525,11 @@ class IBKRConnection:
         return total
 
     def sleep(self, seconds: float):
-        if self.connected:
-            try:
-                self.ib.sleep(seconds)
-            except Exception:
-                time.sleep(seconds)
-        else:
-            time.sleep(seconds)
+        # ib.sleep() calls asyncio.ensure_future() internally; on Python 3.14
+        # this raises ValueError when called from inside an already-running
+        # event loop (e.g. run_live.py's loop.run_until_complete). Use plain
+        # time.sleep() which has no asyncio dependencies.
+        time.sleep(seconds)
 
     def disconnect(self):
         for pair_name, contract in self._contracts.items():

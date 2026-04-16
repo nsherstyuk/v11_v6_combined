@@ -100,8 +100,8 @@ class LiveConfig:
     llm_daily_bars_context: int = 30        # daily bars to send to LLM
 
     # Safety limits (CENTER — changes require approval)
-    max_daily_trades: int = 20              # per instrument
-    max_daily_loss: float = 500.0           # USD, per instrument
+    max_daily_trades: int = 20              # per strategy per day
+    max_daily_loss: float = 500.0           # USD, combined portfolio limit
     max_concurrent_positions: int = 3       # across all instruments
     max_entry_drift_atr: float = 0.5        # max price drift (in ATR) during LLM latency
                                             # if current price moved > 0.5 ATR from

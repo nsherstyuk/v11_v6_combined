@@ -23,6 +23,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # ── Python 3.14 compatibility ────────────────────────────────────────────────
 # Python 3.14 changed asyncio.wait_for to use asyncio.timeout() internally,
@@ -162,16 +163,12 @@ class V11LiveTrader:
         XAUUSD: V6 ORB (own execution engine via adapter)
     """
 
-    # Max disconnect duration before emergency shutdown (seconds)
-    MAX_DISCONNECT_SECONDS = 300  # 5 minutes — must match IBKRConnection.MAX_RECONNECT_DURATION
-
     def __init__(self, live_cfg: LiveConfig, log: logging.Logger,
                  use_llm: bool = True):
         self.live_cfg = live_cfg
         self.log = log
         self._shutdown = False
         self._current_trading_date: str = ""  # for daily reset detection
-        self._disconnect_start: Optional[float] = None  # epoch time of first disconnect
         self._last_price_time: dict[str, float] = {}  # pair -> epoch of last price update
         self._session_reset_done: bool = False  # 5 PM ET broker session reset guard
 
@@ -390,28 +387,15 @@ class V11LiveTrader:
             try:
                 was_connected = self.conn.connected
                 if not self.conn.ensure_connected():
-                    # Track disconnect duration
-                    if self._disconnect_start is None:
-                        self._disconnect_start = time.time()
-                    elapsed = time.time() - self._disconnect_start
-
-                    if elapsed > self.MAX_DISCONNECT_SECONDS:
-                        self.log.critical(
-                            f"IBKR down for {elapsed:.0f}s — EMERGENCY SHUTDOWN")
+                    if self.conn.persistent_failure:
+                        self.log.critical("IBKR persistent failure — EMERGENCY SHUTDOWN")
                         self._emergency_shutdown("persistent_ibkr_failure")
                         break
-
-                    self.log.error(
-                        f"Connection lost — waiting 10s "
-                        f"(down {elapsed:.0f}s/{self.MAX_DISCONNECT_SECONDS}s)")
+                    self.log.error("Connection lost — waiting 10s")
                     time.sleep(10)
                     continue
 
-                # Reconnected — clear timer and reconcile
-                if self._disconnect_start is not None:
-                    self.log.info(
-                        f"Reconnected after {time.time() - self._disconnect_start:.0f}s")
-                    self._disconnect_start = None
+                # Reconnected
                 if not was_connected and self.conn.connected:
                     # Just reconnected — reconcile positions
                     self._reconcile_positions()
@@ -430,7 +414,6 @@ class V11LiveTrader:
 
                 # Broker session reset at 5 PM ET (FX market close)
                 # This aligns PnL limits with the actual trading session boundary
-                from zoneinfo import ZoneInfo
                 et_now = now.astimezone(ZoneInfo("America/New_York"))
                 if (et_now.hour == 17 and et_now.minute < 2
                         and not self._session_reset_done
@@ -450,7 +433,7 @@ class V11LiveTrader:
 
                     # Tick logging for replay
                     if self._tick_logger is not None:
-                        ticker = self.conn._tickers.get(pair)
+                        ticker = self.conn.get_ticker(pair)
                         self._tick_logger.record(
                             pair, now, price,
                             bid=ticker.bid if ticker else None,
@@ -675,23 +658,7 @@ class V11LiveTrader:
                     f"PRICE STALE: {pair} — no price for {stale_s:.0f}s "
                     f"(>300s). Attempting market data stream restart.")
                 # Try restarting the market data stream
-                try:
-                    contract = self.conn._contracts.get(pair)
-                    if contract:
-                        # Cancel old stream
-                        try:
-                            self.conn.ib.cancelMktData(contract)
-                        except Exception:
-                            pass
-                        # Re-subscribe
-                        ticker = self.conn.ib.reqMktData(
-                            contract, '', snapshot=False,
-                            regulatorySnapshot=False)
-                        self.conn.ib.sleep(2)
-                        self.conn._tickers[pair] = ticker
-                        self.log.info(f"Restarted market data stream for {pair}")
-                except Exception as e:
-                    self.log.error(f"Failed to restart stream for {pair}: {e}")
+                self.conn.restart_price_stream(pair)
             elif stale_s > 60:
                 self.log.warning(
                     f"PRICE STALE: {pair} — no price for {stale_s:.0f}s")
@@ -712,11 +679,7 @@ class V11LiveTrader:
             feed.trade_manager.reconcile_position()
 
         # 2. Portfolio-level reconciliation (RiskManager vs broker)
-        try:
-            broker_positions = self.conn.ib.positions()
-        except Exception as e:
-            self.log.error(f"Failed to query broker positions: {e}")
-            return
+        broker_positions = self.conn.get_broker_positions()
 
         # Build set of instruments with broker positions
         broker_instruments = set()
@@ -729,7 +692,7 @@ class V11LiveTrader:
                     break
 
         # Risk manager thinks these instruments have positions
-        rm_positions = set(self.risk_manager._positions.keys())
+        rm_positions = self.risk_manager.get_open_instruments()
 
         # Broker has position but risk manager doesn't know
         for inst in broker_instruments - rm_positions:
@@ -749,7 +712,7 @@ class V11LiveTrader:
             self.log.warning(
                 f"SYNC: Risk manager thinks {inst} has position but broker is flat. "
                 f"Removing from risk manager.")
-            strategy = self.risk_manager._positions.get(inst, "UNKNOWN")
+            strategy = self.risk_manager.get_position_strategy(inst)
             self.risk_manager.record_trade_exit(inst, strategy, pnl=0.0)
 
         self.log.info(

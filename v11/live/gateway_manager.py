@@ -90,22 +90,28 @@ class GatewayManager:
 
     @property
     def config_has_credentials(self) -> bool:
-        """Check if config.ini has IbLoginId and IbPassword set."""
+        """Check if config.ini has IbLoginId and IbPassword set (non-demo)."""
         if not self.config_exists:
             return False
         try:
             text = self._config_path.read_text()
-            has_login = any(
-                line.strip().startswith("IbLoginId=") and not line.strip().endswith("=")
-                for line in text.splitlines()
-                if not line.strip().startswith("#")
-            )
-            has_password = any(
-                line.strip().startswith("IbPassword=") and not line.strip().endswith("=")
-                for line in text.splitlines()
-                if not line.strip().startswith("#")
-            )
-            return has_login and has_password
+            login_id = None
+            password = None
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if stripped.startswith("IbLoginId="):
+                    login_id = stripped[len("IbLoginId="):].strip()
+                elif stripped.startswith("IbPassword="):
+                    password = stripped[len("IbPassword="):].strip()
+            if not login_id or not password:
+                return False
+            # Reject IBC demo/default credentials
+            if login_id.lower() in ('edemo', 'demo') or password.lower() in ('demouser', 'demo'):
+                self._log.warning("IBC config has demo credentials — replace with real IBKR credentials")
+                return False
+            return True
         except Exception:
             return False
 
@@ -210,13 +216,10 @@ class GatewayManager:
                 f"— set CommandServerPort={ibc_port} in IBC config.ini")
             return False
 
-    def enable_api(self) -> bool:
-        """Enable the Gateway API via IBC command server.
-
-        Ensures 'Enable ActiveX and Socket Clients' is checked.
-        """
-        self._log.info("Sending ENABLEAPI command to IBC...")
-        return self.send_ibc_command("ENABLEAPI")
+    def reconnect_data(self) -> bool:
+        """Ask IBC to reconnect the Gateway's data connection."""
+        self._log.info("Sending RECONNECTDATA command to IBC...")
+        return self.send_ibc_command("RECONNECTDATA")
 
     def stop_gateway(self) -> None:
         """Stop the IBC/Gateway process."""
@@ -246,7 +249,7 @@ class GatewayManager:
         """Wait for Gateway API to become available on the configured port.
 
         First waits for the TCP socket, then verifies the IB API handshake.
-        If TCP is open but API doesn't respond, sends ENABLEAPI via IBC.
+        If TCP is open but API doesn't respond after 60s, tries RECONNECTDATA.
 
         Args:
             timeout: Max seconds to wait for Gateway to respond.
@@ -255,20 +258,21 @@ class GatewayManager:
         """
         self._log.info(f"Waiting for Gateway on port {self._port} (timeout={timeout}s)...")
         start = time.time()
-        api_enable_sent = False
+        reconnect_sent = False
         while time.time() - start < timeout:
             if self.check_gateway_health():
                 elapsed = time.time() - start
                 self._log.info(
                     f"Gateway is ready on port {self._port} ({elapsed:.0f}s)")
                 return True
-            # TCP open but API not responding — try enabling API via IBC
-            if not api_enable_sent and self._check_tcp_only():
+            # TCP open but API not responding after 60s — try reconnecting data
+            elapsed = time.time() - start
+            if not reconnect_sent and elapsed > 60 and self._check_tcp_only():
                 self._log.warning(
-                    "Gateway TCP port is open but API not responding "
-                    "— sending ENABLEAPI command to IBC")
-                self.enable_api()
-                api_enable_sent = True
+                    "Gateway TCP port is open but API not responding after 60s "
+                    "— sending RECONNECTDATA command to IBC")
+                self.reconnect_data()
+                reconnect_sent = True
             time.sleep(5)
 
         self._log.error(
@@ -276,12 +280,38 @@ class GatewayManager:
             f"within {timeout}s")
         return False
 
+    def _kill_stale_gateways(self) -> None:
+        """Kill any existing Gateway java processes before starting a new one.
+
+        Prevents multiple Gateway instances fighting for the same port.
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"Name='java.exe'\" | "
+                 "Where-Object { $_.CommandLine -like '*ibcalpha.ibc*' -or "
+                 "$_.CommandLine -like '*ibgateway*' } | "
+                 "Select-Object -ExpandProperty ProcessId"],
+                capture_output=True, text=True, timeout=10)
+            for line in result.stdout.strip().splitlines():
+                pid = line.strip()
+                if pid.isdigit():
+                    self._log.info(f"Killing stale Gateway process PID={pid}")
+                    subprocess.call(["taskkill", "/F", "/T", "/PID", pid],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            time.sleep(3)  # let ports release
+        except Exception as e:
+            self._log.warning(f"Stale process cleanup failed: {e}")
+
     def ensure_gateway_running(self, restart_timeout: float = 120) -> bool:
         """Ensure Gateway is running. Start via IBC if not.
 
         This is the main entry point for V11 integration:
             1. Check if Gateway is accepting connections
-            2. If not, start via IBC
+            2. If not, kill stale processes and start via IBC
             3. Wait for Gateway to become available
             4. Return True if Gateway is ready
 
@@ -301,6 +331,9 @@ class GatewayManager:
                 "Install IBC from https://github.com/IbcAlpha/IBC/releases "
                 "and configure config.ini with your IBKR credentials.")
             return False
+
+        # Kill any stale Gateway processes before starting fresh
+        self._kill_stale_gateways()
 
         if not self.start_gateway_via_ibc():
             return False
@@ -393,7 +426,31 @@ def main():
             log.error(f"Gateway is NOT responding on port {args.port}")
             sys.exit(1)
 
-    # Persistent monitor mode
+    # Persistent monitor mode — single instance only
+    lock_file = ROOT / "v11" / "live" / ".gateway_manager.lock"
+    if lock_file.exists():
+        try:
+            old_pid = int(lock_file.read_text().strip())
+            import ctypes
+            from ctypes import wintypes, byref
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, old_pid)
+            if handle:
+                exit_code = wintypes.DWORD()
+                kernel32.GetExitCodeProcess(handle, byref(exit_code))
+                kernel32.CloseHandle(handle)
+                if exit_code.value == 259:  # STILL_ACTIVE
+                    log.error(
+                        f"Another gateway_manager is already running (PID {old_pid}). "
+                        f"Delete {lock_file} if this is stale.")
+                    sys.exit(1)
+                else:
+                    log.info(f"Stale lock file (PID {old_pid} exited with {exit_code.value}), removing")
+                    lock_file.unlink(missing_ok=True)
+            # If OpenProcess returns 0, PID doesn't exist — stale lock
+        except (ValueError, OSError):
+            pass  # stale lock file, proceed
+
     if not gm.ibc_installed:
         log.error("IBC not installed. Printing setup guide:")
         print(gm.setup_guide())
@@ -404,6 +461,8 @@ def main():
         print(gm.setup_guide())
         sys.exit(1)
 
+    # Write lock file
+    lock_file.write_text(str(os.getpid()))
     log.info("Gateway Manager starting — monitoring IBKR Gateway health")
 
     check_interval = 60  # check every 60 seconds
@@ -442,6 +501,10 @@ def main():
         log.info("Gateway Manager stopped by user")
     finally:
         gm.stop_gateway()
+        try:
+            lock_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

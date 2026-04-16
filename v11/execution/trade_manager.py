@@ -31,7 +31,7 @@ from .ibkr_connection import IBKRConnection
 TRADE_CSV_FIELDS = [
     'timestamp', 'instrument', 'direction', 'entry_price', 'exit_price',
     'fill_entry_price', 'fill_exit_price', 'stop_price', 'target_price',
-    'box_top', 'box_bottom', 'quantity', 'pnl', 'ibkr_pnl',
+    'box_top', 'box_bottom', 'quantity', 'pnl', 'engine_pnl', 'ibkr_pnl',
     'entry_commission', 'exit_commission', 'entry_slippage', 'exit_slippage',
     'exit_reason', 'buy_ratio', 'llm_confidence', 'llm_reasoning',
     'hold_bars',
@@ -53,12 +53,14 @@ class TradeManager:
         trade_log_dir: Path,
         dry_run: bool = True,
         max_hold_bars: int = 120,
+        auto_close_orphans: bool = False,
     ):
         self._conn = conn
         self._inst = inst
         self._log = log
         self._dry_run = dry_run
         self._max_hold_bars = max_hold_bars
+        self._auto_close_orphans = auto_close_orphans
         self._trade_log_path = trade_log_dir / f"trades_{inst.pair_name.lower()}.csv"
         trade_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -80,6 +82,7 @@ class TradeManager:
         self._entry_commission: float = 0.0
         self._entry_trade = None
         self._sl_order = None
+        self._tp_order = None
 
         # Trade closed callback (for auto-assessment)
         self.on_trade_closed = None  # Callable[[TradeRecord], None]
@@ -134,24 +137,45 @@ class TradeManager:
         self._entry_commission = 0.0
         self._entry_trade = None
         self._sl_order = None
+        self._tp_order = None
 
         if self._dry_run:
             self._log.info(f"[DRY RUN] {self._inst.pair_name}: Would enter trade")
             return True
 
-        # Submit market entry order
-        entry_trade = self._conn.submit_market_order(
-            self._inst.pair_name, direction.value, self._inst.quantity)
+        entry_trade = None
 
+        # PRIMARY PATH: atomic bracket (entry+SL+TP, no naked position window)
+        if self.stop_price > 0 and self.target_price > 0:
+            entry_trade, self._sl_order, self._tp_order = (
+                self._conn.submit_bracket_order(
+                    self._inst.pair_name, direction.value, self._inst.quantity,
+                    self.stop_price, self.target_price,
+                    tick_size=self._inst.tick_size))
+            if entry_trade is not None:
+                self._entry_trade = entry_trade
+                self._log.info(
+                    f"{self._inst.pair_name}: BRACKET placed — "
+                    f"SL={self.stop_price:{pf}} TP={self.target_price:{pf}}")
+            else:
+                self._sl_order = None
+                self._tp_order = None
+                self._log.warning(
+                    f"{self._inst.pair_name}: BRACKET FAILED — "
+                    f"falling back to two-step")
+
+        # FALLBACK PATH: two-step (market order first, then SL/TP separately)
         if entry_trade is None:
-            self._log.error(
-                f"{self._inst.pair_name}: ENTRY ORDER FAILED — resetting")
-            self._reset_trade_state()
-            return False
+            entry_trade = self._conn.submit_market_order(
+                self._inst.pair_name, direction.value, self._inst.quantity)
+            if entry_trade is None:
+                self._log.error(
+                    f"{self._inst.pair_name}: ENTRY ORDER FAILED — resetting")
+                self._reset_trade_state()
+                return False
+            self._entry_trade = entry_trade
 
-        self._entry_trade = entry_trade
-
-        # Capture actual fill price
+        # Capture fill price (applies to both bracket and two-step paths)
         fill_price = entry_trade.orderStatus.avgFillPrice
         if fill_price and fill_price > 0:
             self._fill_entry_price = fill_price
@@ -174,29 +198,66 @@ class TradeManager:
                 f"{self._inst.pair_name}: ENTRY COMMISSION: "
                 f"${self._entry_commission:.2f}")
 
-        # Submit SL order (CENTER: must be atomic with entry)
+        # Bracket succeeded — SL/TP already placed atomically, done
+        if self._sl_order is not None:
+            return True
+
+        # Two-step SL/TP placement (for fallback path or no-TP case)
         if self.stop_price > 0:
-            self._sl_order = self._conn.submit_stop_order(
-                self._inst.pair_name, direction.value,
-                self._inst.quantity, self.stop_price,
-                tick_size=self._inst.tick_size)
-            if self._sl_order is None:
-                self._log.warning(
-                    f"{self._inst.pair_name}: SL ORDER FAILED — retrying")
-                self._conn.sleep(5)
+            if self.target_price > 0:
+                # OCA pair (SL + TP together)
+                self._sl_order, self._tp_order = self._conn.submit_sl_tp_oca(
+                    self._inst.pair_name, direction.value,
+                    self._inst.quantity, self.stop_price, self.target_price,
+                    tick_size=self._inst.tick_size)
+                if self._sl_order is None:
+                    self._log.warning(
+                        f"{self._inst.pair_name}: SL/TP OCA FAILED — retrying SL-only")
+                    self._conn.sleep(5)
+                    self._sl_order = self._conn.submit_stop_order(
+                        self._inst.pair_name, direction.value,
+                        self._inst.quantity, self.stop_price,
+                        tick_size=self._inst.tick_size)
+                    if self._sl_order is None:
+                        self._log.error(
+                            f"{self._inst.pair_name}: SL ORDER FAILED TWICE — "
+                            f"FORCE CLOSING POSITION (unhedged risk)")
+                        self._conn.close_position(
+                            self._inst.pair_name, direction.value,
+                            self._inst.quantity)
+                        self._poll_until_flat("forced close after SL failure")
+                        self._reset_trade_state()
+                        return False
+                    self._log.warning(
+                        f"{self._inst.pair_name}: SL placed (no TP in IBKR)")
+                else:
+                    self._log.info(
+                        f"{self._inst.pair_name}: SL/TP OCA placed — "
+                        f"SL={self.stop_price:{pf}} TP={self.target_price:{pf}}")
+            else:
+                # No target price — SL only
                 self._sl_order = self._conn.submit_stop_order(
                     self._inst.pair_name, direction.value,
                     self._inst.quantity, self.stop_price,
                     tick_size=self._inst.tick_size)
                 if self._sl_order is None:
-                    self._log.error(
-                        f"{self._inst.pair_name}: SL ORDER FAILED TWICE — "
-                        f"FORCE CLOSING POSITION (unhedged risk)")
-                    self._conn.close_position(
+                    self._log.warning(
+                        f"{self._inst.pair_name}: SL ORDER FAILED — retrying")
+                    self._conn.sleep(5)
+                    self._sl_order = self._conn.submit_stop_order(
                         self._inst.pair_name, direction.value,
-                        self._inst.quantity)
-                    self._reset_trade_state()
-                    return False
+                        self._inst.quantity, self.stop_price,
+                        tick_size=self._inst.tick_size)
+                    if self._sl_order is None:
+                        self._log.error(
+                            f"{self._inst.pair_name}: SL ORDER FAILED TWICE — "
+                            f"FORCE CLOSING POSITION (unhedged risk)")
+                        self._conn.close_position(
+                            self._inst.pair_name, direction.value,
+                            self._inst.quantity)
+                        self._poll_until_flat("forced close after SL-only failure")
+                        self._reset_trade_state()
+                        return False
 
         return True
 
@@ -274,7 +335,12 @@ class TradeManager:
         exit_trade = None
 
         if not self._dry_run:
-            # Cancel SL order
+            # Save order references before nulling — needed for fill capture below
+            sl_order_ref = self._sl_order
+            tp_order_ref = self._tp_order
+
+            # Cancel SL and TP orders (IBKR OCA cancels the other automatically
+            # when one fills, but we cancel both explicitly on software-triggered exits)
             if self._sl_order:
                 try:
                     self._conn.ib.cancelOrder(self._sl_order.order)
@@ -282,8 +348,18 @@ class TradeManager:
                     self._log.warning(
                         f"{self._inst.pair_name}: SL cancel on exit: {e}")
                 self._sl_order = None
+            if self._tp_order:
+                try:
+                    self._conn.ib.cancelOrder(self._tp_order.order)
+                except Exception as e:
+                    self._log.warning(
+                        f"{self._inst.pair_name}: TP cancel on exit: {e}")
+                self._tp_order = None
 
-            # Close at market (unless SL already triggered)
+            # Brief wait for cancel ACK before submitting market close (Fix 6)
+            self._conn.sleep(0.5)
+
+            # Close at market unless IBKR already filled the exit order
             if reason != ExitReason.SL:
                 if self._conn.has_position(self._inst.symbol, self._inst.sec_type):
                     exit_trade = self._conn.close_position(
@@ -291,15 +367,20 @@ class TradeManager:
                         self._inst.quantity)
                 else:
                     self._log.info(
-                        f"{self._inst.pair_name}: No position at broker")
+                        f"{self._inst.pair_name}: No position at broker "
+                        f"(IBKR bracket already filled)")
 
-            # Capture exit fill
+            # Capture exit fill price (use saved refs — self._sl/tp_order already None)
             if exit_trade:
                 fp = exit_trade.orderStatus.avgFillPrice
                 if fp and fp > 0:
                     fill_exit_price = fp
-            elif reason == ExitReason.SL and self._sl_order:
-                fp = self._sl_order.orderStatus.avgFillPrice
+            elif reason == ExitReason.SL and sl_order_ref:
+                fp = sl_order_ref.orderStatus.avgFillPrice
+                if fp and fp > 0:
+                    fill_exit_price = fp
+            elif reason == ExitReason.TARGET and tp_order_ref:
+                fp = tp_order_ref.orderStatus.avgFillPrice
                 if fp and fp > 0:
                     fill_exit_price = fp
 
@@ -345,6 +426,8 @@ class TradeManager:
             box_bottom=self.box_bottom,
             exit_reason=reason.value,
             pnl=ibkr_pnl if fill_exit_price > 0 else engine_pnl,
+            engine_pnl=engine_pnl,
+            ibkr_pnl=ibkr_pnl,
             hold_bars=bars_held,
             buy_ratio_at_entry=self.buy_ratio,
             llm_confidence=self.llm_confidence,
@@ -392,6 +475,120 @@ class TradeManager:
         self._entry_commission = 0.0
         self._entry_trade = None
         self._sl_order = None
+        self._tp_order = None
+
+    def _poll_until_flat(self, context: str, max_polls: int = 10) -> None:
+        """Poll broker position until confirmed flat after a forced close (Fix 2)."""
+        for i in range(max_polls):
+            self._conn.sleep(1)
+            pos = self._conn.get_position_size(
+                self._inst.symbol, self._inst.sec_type)
+            if abs(pos) < 0.001:
+                self._log.info(
+                    f"{self._inst.pair_name}: Confirmed flat after {context} "
+                    f"(after {i + 1}s)")
+                return
+        self._log.error(
+            f"{self._inst.pair_name}: NOT FLAT after {context} "
+            f"and {max_polls}s polling! Manual intervention required.")
+
+    def emergency_close(self, reason: str = "EMERGENCY") -> None:
+        """Force-close any open position at market. Used during emergency shutdown.
+
+        Unlike _execute_exit, this doesn't require bar context and works
+        even if internal state is partially inconsistent.
+        """
+        if not self.in_trade:
+            return
+
+        self._log.critical(
+            f"EMERGENCY CLOSE: {self._inst.pair_name} "
+            f"{self.direction.value if self.direction else '?'} "
+            f"qty={self._inst.quantity}")
+
+        if not self._dry_run:
+            # Cancel SL and TP orders
+            if self._sl_order:
+                try:
+                    self._conn.ib.cancelOrder(self._sl_order.order)
+                except Exception:
+                    pass
+                self._sl_order = None
+            if self._tp_order:
+                try:
+                    self._conn.ib.cancelOrder(self._tp_order.order)
+                except Exception:
+                    pass
+                self._tp_order = None
+
+            # Close at market then poll/retry until confirmed flat (Fix 5)
+            direction = self.direction.value if self.direction else "long"
+            try:
+                self._conn.close_position(
+                    self._inst.pair_name, direction, self._inst.quantity)
+            except Exception as e:
+                self._log.error(f"Emergency close attempt 1 failed: {e}")
+
+            for attempt in range(3):
+                self._conn.sleep(2)
+                pos = self._conn.get_position_size(
+                    self._inst.symbol, self._inst.sec_type)
+                if abs(pos) < 0.001:
+                    self._log.info(
+                        f"{self._inst.pair_name}: Emergency close confirmed flat")
+                    break
+                self._log.warning(
+                    f"{self._inst.pair_name}: Still has position "
+                    f"({pos}) after emergency close attempt {attempt + 1}")
+                if attempt < 2:
+                    try:
+                        self._conn.close_position(
+                            self._inst.pair_name, direction, abs(pos))
+                    except Exception as e:
+                        self._log.error(
+                            f"Emergency close retry {attempt + 2} failed: {e}")
+            else:
+                self._log.error(
+                    f"{self._inst.pair_name}: EMERGENCY CLOSE INCOMPLETE "
+                    f"after 3 attempts! Manual intervention required.")
+
+        # Log the emergency close as a trade record
+        try:
+            record = TradeRecord(
+                entry_time=datetime.now(timezone.utc),
+                exit_time=datetime.now(timezone.utc),
+                direction=self.direction,
+                instrument=self._inst.pair_name,
+                entry_price=self.signal_entry_price,
+                exit_price=self.signal_entry_price,
+                stop_price=self.stop_price,
+                target_price=self.target_price,
+                box_top=self.box_top,
+                box_bottom=self.box_bottom,
+                exit_reason="EMERGENCY",
+                pnl=0.0,
+                hold_bars=0,
+                buy_ratio_at_entry=self.buy_ratio,
+                llm_confidence=self.llm_confidence,
+                llm_reasoning=self.llm_reasoning,
+                fill_entry_price=self._fill_entry_price,
+                fill_exit_price=0.0,
+                entry_commission=self._entry_commission,
+                exit_commission=0.0,
+                entry_slippage=0.0,
+                exit_slippage=0.0,
+            )
+            self._log_trade_csv(record)
+            self.daily_trades += 1
+            if self.on_trade_closed:
+                try:
+                    self.on_trade_closed(record)
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log.error(f"Failed to log emergency close: {e}")
+
+        self._reset_trade_state()
 
     def reconcile_position(self) -> None:
         """Reconcile internal state with broker after reconnect.
@@ -410,10 +607,31 @@ class TradeManager:
                 f"externally or SL filled during disconnect)")
             self._reset_trade_state()
         elif not self.in_trade and broker_has_pos:
-            self._log.warning(
-                f"{self._inst.pair_name}: RECONCILE — internal=flat but "
-                f"broker has position={broker_pos}. Orphaned position "
-                f"detected — manual intervention required")
+            if self._auto_close_orphans:
+                self._log.warning(
+                    f"{self._inst.pair_name}: RECONCILE — internal=flat but "
+                    f"broker has position={broker_pos}. Auto-closing orphan.")
+                # Determine direction from broker position sign
+                direction = "long" if broker_pos > 0 else "short"
+                try:
+                    self._conn.close_position(
+                        self._inst.pair_name, direction, abs(broker_pos))
+                    self._log.info(
+                        f"{self._inst.pair_name}: Orphan position closed")
+                except Exception as e:
+                    self._log.error(
+                        f"{self._inst.pair_name}: Orphan close failed: {e}")
+            else:
+                self._log.warning(
+                    f"{self._inst.pair_name}: RECONCILE — internal=flat but "
+                    f"broker has position={broker_pos}. Orphaned position "
+                    f"detected — manual intervention required")
+        elif self.in_trade and broker_has_pos:
+            expected_qty = self._inst.quantity
+            if abs(abs(broker_pos) - expected_qty) > 0.001:
+                self._log.warning(
+                    f"{self._inst.pair_name}: RECONCILE — SIZE MISMATCH: "
+                    f"broker={broker_pos}, expected={expected_qty}")
         else:
             self._log.info(
                 f"{self._inst.pair_name}: RECONCILE — "
@@ -447,7 +665,8 @@ class TradeManager:
                     'box_bottom': f"{record.box_bottom}",
                     'quantity': self._inst.quantity,
                     'pnl': f"{record.pnl:.2f}",
-                    'ibkr_pnl': f"{record.pnl:.2f}",
+                    'engine_pnl': f"{record.engine_pnl:.2f}",
+                    'ibkr_pnl': f"{record.ibkr_pnl:.2f}",
                     'entry_commission': f"{record.entry_commission:.2f}" if record.entry_commission > 0 else '',
                     'exit_commission': f"{record.exit_commission:.2f}" if record.exit_commission > 0 else '',
                     'entry_slippage': f"{record.entry_slippage}" if record.entry_slippage != 0 else '',
