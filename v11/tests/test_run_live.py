@@ -304,3 +304,49 @@ class TestCLIDefaults:
         args = parser.parse_args(["--live"])
         dry_run = not args.live
         assert dry_run is False
+
+
+# ── 8. TickLogger integration ────────────────────────────────────────────────
+
+class TestTickLoggerIntegration:
+    def test_tick_logger_initialised_when_enabled(self, tmp_path, log):
+        """V11LiveTrader creates a TickLogger when tick_logging=True."""
+        cfg = LiveConfig(
+            instruments=[EURUSD_INSTRUMENT],
+            tick_logging=True,
+            tick_log_dir=tmp_path / "ticks",
+            dry_run=True,
+        )
+        trader = _make_trader(cfg, log)
+        assert trader._tick_logger is not None
+        trader._tick_logger.close()
+
+    def test_tick_logger_none_when_disabled(self, tmp_path, log):
+        """V11LiveTrader skips TickLogger when tick_logging=False."""
+        cfg = LiveConfig(
+            instruments=[EURUSD_INSTRUMENT],
+            tick_logging=False,
+            tick_log_dir=tmp_path / "ticks",
+            dry_run=True,
+        )
+        trader = _make_trader(cfg, log)
+        assert trader._tick_logger is None
+
+    def test_cleanup_closes_tick_logger(self, tmp_path, log):
+        """_cleanup() calls close() on the TickLogger."""
+        cfg = LiveConfig(
+            instruments=[EURUSD_INSTRUMENT],
+            tick_logging=True,
+            tick_log_dir=tmp_path / "ticks",
+            dry_run=True,
+        )
+        trader = _make_trader(cfg, log)
+        # Write one tick so close() has something to flush
+        from datetime import datetime, timezone
+        trader._tick_logger.record(
+            "EURUSD", datetime(2026, 4, 15, 14, 0, tzinfo=timezone.utc),
+            1.1234, None, None, None, None, None, None,
+        )
+        # _cleanup() must not raise
+        trader._cleanup()
+        assert trader._tick_logger._handles == {}

@@ -225,6 +225,14 @@ class V11LiveTrader:
         # Track which instruments are active
         self._active_pairs: list[str] = []
 
+        # Tick logging for replay data capture
+        self._tick_logger = None
+        if live_cfg.tick_logging:
+            from v11.replay.tick_logger import TickLogger
+            tick_log_dir = ROOT / str(live_cfg.tick_log_dir)
+            self._tick_logger = TickLogger(base_dir=tick_log_dir)
+            log.info(f"Tick logging enabled → {tick_log_dir}")
+
     def _wire_strategies(self) -> None:
         """Add strategies to the runner based on configured instruments."""
         active_pairs = {i.pair_name for i in self.live_cfg.instruments}
@@ -351,7 +359,7 @@ class V11LiveTrader:
                 time.sleep(wait)
         if not connected:
             self.log.error("Cannot connect to IBKR after extended retries — exiting")
-            return
+            sys.exit(1)
 
         # Qualify contracts and start price streams
         for inst_cfg in self.live_cfg.instruments:
@@ -439,6 +447,19 @@ class V11LiveTrader:
                     price = self.conn.get_mid_price(pair)
                     if price is None:
                         continue
+
+                    # Tick logging for replay
+                    if self._tick_logger is not None:
+                        ticker = self.conn._tickers.get(pair)
+                        self._tick_logger.record(
+                            pair, now, price,
+                            bid=ticker.bid if ticker else None,
+                            ask=ticker.ask if ticker else None,
+                            last=ticker.last if ticker else None,
+                            bid_size=ticker.bidSize if ticker else None,
+                            ask_size=ticker.askSize if ticker else None,
+                            last_size=ticker.lastSize if ticker else None,
+                        )
 
                     # Track price freshness
                     self._last_price_time[pair] = time.time()
@@ -684,8 +705,10 @@ class V11LiveTrader:
         """
         self.log.info("Reconciling positions after reconnect...")
 
-        # 1. Per-instrument reconciliation (TradeManager handles orphan detection)
+        # 1. Per-instrument reconciliation (cancel open orders first so no stale
+        #    orders race with the position check, then reconcile state)
         for feed in self.runner.feeds.values():
+            self.conn.cancel_orders_for(feed.inst_config.pair_name)
             feed.trade_manager.reconcile_position()
 
         # 2. Portfolio-level reconciliation (RiskManager vs broker)
@@ -799,6 +822,8 @@ class V11LiveTrader:
 
     def _cleanup(self) -> None:
         """Clean up on shutdown. ORB adapter handles its own cleanup."""
+        if self._tick_logger is not None:
+            self._tick_logger.close()
         for engine in self.runner.engines:
             if hasattr(engine, 'cleanup'):
                 engine.cleanup()
@@ -858,7 +883,7 @@ def main():
     use_llm = not args.no_llm
     log.info(f"  LLM:         {'grok (active)' if use_llm else 'DISABLED'}")
     if use_llm:
-        log.info(f"  Confidence:  Darvas >= {live_cfg.llm_confidence_threshold}, "
+        log.info(f"  Confidence:  Darvas/4H >= {live_cfg.llm_confidence_threshold}, "
                  f"ORB >= {live_cfg.orb_confidence_threshold}")
     log.info(f"  Daily loss:  ${live_cfg.max_daily_loss:.0f}")
     log.info("=" * 60)
