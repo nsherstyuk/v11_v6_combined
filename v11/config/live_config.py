@@ -12,6 +12,7 @@ Adapted from v8 LiveConfig with additions for:
 import math
 from dataclasses import dataclass, field
 from functools import cached_property
+from pathlib import Path
 from typing import List
 
 
@@ -115,6 +116,10 @@ class LiveConfig:
 
     # Logging
     grok_log_dir: str = "grok_logs"
+
+    # Tick logging for replay data capture
+    tick_logging: bool = True
+    tick_log_dir: Path = field(default_factory=lambda: Path("data/ticks"))
 
     def validate(self) -> None:
         """Sanity check config values."""
