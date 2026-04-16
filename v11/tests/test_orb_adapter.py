@@ -492,14 +492,105 @@ class TestCleanup:
         mock_ctx.disconnect.assert_called_once()
 
 
-# ── 10. on_bar no-op ────────────────────────────────────────────────────────
+# ── 10. on_bar stores bar in buffer ──────────────────────────────────────────
 
-class TestOnBarNoOp:
+class TestOnBarBuffer:
     @pytest.mark.asyncio
-    async def test_on_bar_does_nothing(self, adapter):
-        """on_bar should be a complete no-op."""
+    async def test_on_bar_stores_bar_in_buffer(self, adapter):
+        """on_bar must buffer the bar for velocity computation."""
+        bar = MagicMock()
+        await adapter.on_bar(bar)
+        assert len(adapter._bar_buffer) == 1
+        assert adapter._bar_buffer[0] is bar
+
+    @pytest.mark.asyncio
+    async def test_on_bar_does_not_change_strategy_state(self, adapter):
+        """Storing a bar must not affect strategy state."""
         bar = MagicMock()
         initial_state = adapter._strategy.state
         await adapter.on_bar(bar)
         assert adapter._strategy.state == initial_state
         assert adapter.bar_count == 0
+
+    @pytest.mark.asyncio
+    async def test_multiple_bars_accumulated(self, adapter):
+        """Multiple on_bar calls accumulate bars in order."""
+        bars = [MagicMock() for _ in range(5)]
+        for b in bars:
+            await adapter.on_bar(b)
+        assert len(adapter._bar_buffer) == 5
+        assert list(adapter._bar_buffer) == bars
+
+
+# ── 11. Bar-level velocity ────────────────────────────────────────────────────
+
+class TestBarVelocity:
+    def _make_bar(self, ts: datetime, tick_count: int):
+        """Create a real Bar object (not a mock) for velocity tests."""
+        from v11.core.types import Bar
+        return Bar(
+            timestamp=ts,
+            open=1.0, high=1.0, low=1.0, close=1.0,
+            tick_count=tick_count,
+            buy_volume=0.0, sell_volume=0.0,
+        )
+
+    def test_no_bars_returns_zero(self, adapter):
+        """Velocity is 0 when bar buffer is empty."""
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        assert adapter._compute_bar_velocity(3, now) == 0.0
+
+    def test_velocity_from_three_bars(self, adapter):
+        """3 bars in window → sum(tick_counts) / lookback_minutes."""
+        now = datetime(2025, 1, 15, 10, 3, 0, tzinfo=timezone.utc)
+        for i, tc in enumerate([200, 150, 180]):
+            ts = datetime(2025, 1, 15, 10, i, 0, tzinfo=timezone.utc)
+            adapter._bar_buffer.append(self._make_bar(ts, tc))
+
+        # 3-minute lookback: all 3 bars are within window
+        velocity = adapter._compute_bar_velocity(3, now)
+        assert abs(velocity - (200 + 150 + 180) / 3) < 0.01
+
+    def test_bars_outside_window_excluded(self, adapter):
+        """Bars older than lookback_minutes are not counted."""
+        now = datetime(2025, 1, 15, 10, 5, 0, tzinfo=timezone.utc)
+        # Bar 1 minute ago (in window)
+        adapter._bar_buffer.append(
+            self._make_bar(datetime(2025, 1, 15, 10, 4, 0, tzinfo=timezone.utc), 300))
+        # Bar 6 minutes ago (outside 3-min window)
+        adapter._bar_buffer.append(
+            self._make_bar(datetime(2025, 1, 15, 9, 59, 0, tzinfo=timezone.utc), 999))
+
+        velocity = adapter._compute_bar_velocity(3, now)
+        assert abs(velocity - 300 / 3) < 0.01  # only the recent bar counts
+
+    def test_fewer_bars_than_lookback(self, adapter):
+        """Works correctly with fewer bars than lookback window."""
+        now = datetime(2025, 1, 15, 10, 3, 0, tzinfo=timezone.utc)
+        adapter._bar_buffer.append(
+            self._make_bar(datetime(2025, 1, 15, 10, 2, 0, tzinfo=timezone.utc), 150))
+        # Only 1 bar but 3-minute lookback → still divides by lookback
+        velocity = adapter._compute_bar_velocity(3, now)
+        assert abs(velocity - 150 / 3) < 0.01
+
+    def test_context_get_velocity_uses_bar_level(self, adapter):
+        """LiveMarketContext.get_velocity() is overridden to use bar tick_counts."""
+        now = datetime(2025, 1, 15, 10, 3, 0, tzinfo=timezone.utc)
+        for i, tc in enumerate([200, 150, 180]):
+            ts = datetime(2025, 1, 15, 10, i, 0, tzinfo=timezone.utc)
+            adapter._bar_buffer.append(self._make_bar(ts, tc))
+
+        # The override should produce the same result as _compute_bar_velocity
+        ctx_velocity = adapter._context.get_velocity(3, now)
+        expected = adapter._compute_bar_velocity(3, now)
+        assert abs(ctx_velocity - expected) < 0.01
+
+    def test_exceeds_threshold_when_active(self, adapter):
+        """Confirms the 168 threshold is reachable with bar-level data."""
+        now = datetime(2025, 1, 15, 10, 3, 0, tzinfo=timezone.utc)
+        for i, tc in enumerate([250, 200, 180]):
+            ts = datetime(2025, 1, 15, 10, i, 0, tzinfo=timezone.utc)
+            adapter._bar_buffer.append(self._make_bar(ts, tc))
+
+        velocity = adapter._compute_bar_velocity(3, now)
+        assert velocity > 168  # sum=630, /3 = 210 > threshold

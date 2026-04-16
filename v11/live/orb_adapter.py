@@ -24,7 +24,8 @@ Design (V11_DESIGN.md §11, Phase 5):
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from ..v6_orb.orb_strategy import ORBStrategy, StrategyState
@@ -130,6 +131,19 @@ class ORBAdapter:
         self._current_date: Optional[str] = None
         self._range_calculated: bool = False
         self._gap_calculated: bool = False
+
+        # ── Bar-level velocity (replaces tick-stream velocity) ─────
+        # V6's LiveMarketContext.get_velocity() counts ticks from its
+        # own tick_buffer, which receives IBKR snapshot ticks at ~60/min
+        # (constant regardless of market activity). The V6 threshold of
+        # 168 was calibrated on bar-level tick_count data (mean 144/min,
+        # 30.7% of minutes exceed 168). We override get_velocity on the
+        # context instance to use bar tick_counts instead.
+        self._bar_buffer: deque = deque(maxlen=60)  # 60 bars = 1 hour
+        _adapter = self
+        self._context.get_velocity = (
+            lambda lookback, ts: _adapter._compute_bar_velocity(lookback, ts)
+        )
 
     # ── StrategyEngine protocol ───────────────────────────────────
 
@@ -262,7 +276,12 @@ class ORBAdapter:
                 f"ORB state: {state_before.value} -> {state_after.value}")
 
     async def on_bar(self, bar) -> None:
-        """Evaluate LLM gate when pending (requires async context for Grok API)."""
+        """Store bar for velocity calculation; evaluate LLM gate when pending."""
+        # Always buffer the bar for bar-level velocity computation.
+        # This gives get_velocity() real tick activity data instead of
+        # the constant ~60/min IBKR snapshot rate.
+        self._bar_buffer.append(bar)
+
         if not self._llm_gate_pending:
             return
 
@@ -298,18 +317,17 @@ class ORBAdapter:
             dist_to_high = current_price - s.range.high
             dist_to_low = current_price - s.range.low
 
-        # Velocity info for diagnostics
-        from datetime import datetime as _dt, timezone as _tz
-        now_utc = _dt.now(tz=_tz.utc).replace(microsecond=0)
+        # Velocity info for diagnostics (bar-level, reflects real market activity)
+        now_utc = datetime.now(tz=timezone.utc).replace(microsecond=0)
         velocity = 0.0
         tick_count = 0
         if cfg.velocity_filter_enabled:
-            velocity = self._context.get_velocity(
+            velocity = self._compute_bar_velocity(
                 cfg.velocity_lookback_minutes, now_utc)
-            cutoff = now_utc - __import__('datetime').timedelta(
-                minutes=cfg.velocity_lookback_minutes)
+            cutoff = now_utc - timedelta(minutes=cfg.velocity_lookback_minutes)
             tick_count = sum(
-                1 for t in self._context.tick_buffer if t.timestamp >= cutoff)
+                b.tick_count for b in self._bar_buffer
+                if b.timestamp >= cutoff)
 
         # Resting order info
         has_resting = self._execution.has_resting_entries()
@@ -669,6 +687,28 @@ class ORBAdapter:
         if self._execution.has_position():
             self._execution.close_at_market()
         self._context.disconnect()
+
+    # ── Bar-level velocity ────────────────────────────────────────
+
+    def _compute_bar_velocity(self, lookback_minutes: int,
+                              now: Optional[datetime] = None) -> float:
+        """Velocity (ticks/min) from recent bar tick_counts.
+
+        Replaces LiveMarketContext.get_velocity() which counts IBKR snapshot
+        ticks (~60/min constant). Bar tick_counts reflect actual market activity
+        and match the distribution V6's 168 threshold was calibrated on.
+
+        Args:
+            lookback_minutes: Window size (matches V6 velocity_lookback_minutes).
+            now: Reference time (default: UTC now). Injected for testability.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=lookback_minutes)
+        recent = [b for b in self._bar_buffer if b.timestamp >= cutoff]
+        if not recent:
+            return 0.0
+        return sum(b.tick_count for b in recent) / max(lookback_minutes, 1)
 
     # ── Slow ATR ──────────────────────────────────────────────────
 
