@@ -41,7 +41,7 @@ class TestTickLoggerHeader:
 
 
 class TestTickLoggerRowFormat:
-    def test_mid_written_to_8dp(self):
+    def test_mid_written_with_trailing_zeros_stripped(self):
         with tempfile.TemporaryDirectory() as tmp:
             logger = TickLogger(Path(tmp))
             logger.record("EURUSD", _ts(2026, 4, 15), 1.12345678,
@@ -51,8 +51,9 @@ class TestTickLoggerRowFormat:
 
             lines = (Path(tmp) / "EURUSD" / "2026-04-15.csv").read_text().splitlines()
             row = lines[1]
-            assert "1.12345678" in row
-            assert "1.12340000" in row
+            assert "1.12345678" in row   # all digits significant — unchanged
+            assert "1.1234," in row      # trailing zeros stripped: 1.12340000 -> 1.1234
+            assert "1.1235," in row      # trailing zeros stripped: 1.12350000 -> 1.1235
 
     def test_nan_written_as_blank(self):
         with tempfile.TemporaryDirectory() as tmp:

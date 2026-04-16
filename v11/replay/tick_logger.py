@@ -30,7 +30,7 @@ def _fmt(v) -> str:
     if isinstance(v, float) and (math.isnan(v) or v == 0.0):
         return ""
     try:
-        return f"{float(v):.8f}"
+        return f"{float(v):.8f}".rstrip('0').rstrip('.')
     except (TypeError, ValueError):
         return ""
 
