@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from v11.replay.tick_replayer import load_ticks
+from v11.replay.tick_replayer import load_ticks, TickReplayer
+from v11.replay.config import TickReplayConfig
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -157,3 +158,57 @@ class TestLoadTicksGzip:
         ticks = list(load_ticks(tmp_path, ["EURUSD"],
                                 date(2026, 4, 15), date(2026, 4, 15)))
         assert len(ticks) == 2
+
+
+# ─── TickReplayer integration test ──────────────────────────────────────────
+
+class TestTickReplayerRun:
+    """Smoke test: TickReplayer runs without error on synthetic tick data."""
+
+    def _write_ticks(self, base: Path, pair: str, d: date,
+                     prices: list[float]) -> None:
+        """Write ticks at one-second intervals, advancing minutes."""
+        path = base / pair / f"{d}.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            f.write("timestamp,mid,bid,ask,last,bid_size,ask_size,last_size\n")
+            for i, price in enumerate(prices):
+                minute_offset = i // 60
+                second = i % 60
+                ts = datetime(d.year, d.month, d.day, 14, minute_offset, second,
+                              tzinfo=timezone.utc)
+                f.write(f"{ts.isoformat()},{price:.8f},,,,,,\n")
+
+    def test_run_returns_stats_with_bars(self, tmp_path):
+        d = date(2026, 4, 15)
+        # 120 ticks -> crosses 2 minute boundaries -> 2 completed bars
+        prices = [1.1000 + i * 0.00001 for i in range(120)]
+        self._write_ticks(tmp_path, "EURUSD", d, prices)
+
+        cfg = TickReplayConfig(
+            instruments=["EURUSD"],
+            start_date=str(d),
+            end_date=str(d),
+            tick_dir=str(tmp_path),
+            llm_mode="passthrough",
+            output_dir=str(tmp_path / "results"),
+        )
+        replayer = TickReplayer(cfg)
+        result = asyncio.run(replayer.run())
+
+        assert "EURUSD" in result
+        assert result["EURUSD"]["bars"] >= 1
+
+    def test_run_empty_tick_dir_returns_zero_bars(self, tmp_path):
+        """Missing tick files -> no bars, no crash."""
+        cfg = TickReplayConfig(
+            instruments=["EURUSD"],
+            start_date="2026-04-15",
+            end_date="2026-04-15",
+            tick_dir=str(tmp_path),
+            llm_mode="passthrough",
+            output_dir=str(tmp_path / "results"),
+        )
+        replayer = TickReplayer(cfg)
+        result = asyncio.run(replayer.run())
+        assert result["EURUSD"]["bars"] == 0
