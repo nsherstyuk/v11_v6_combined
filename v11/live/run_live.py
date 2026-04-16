@@ -231,7 +231,7 @@ class V11LiveTrader:
             from v11.replay.tick_logger import TickLogger
             tick_log_dir = ROOT / str(live_cfg.tick_log_dir)
             self._tick_logger = TickLogger(base_dir=tick_log_dir)
-            log.info(f"Tick logging enabled → {tick_log_dir}")
+            log.info(f"Tick logging enabled -> {tick_log_dir}")
 
     def _wire_strategies(self) -> None:
         """Add strategies to the runner based on configured instruments."""
