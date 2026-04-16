@@ -79,6 +79,72 @@ class GrokFilter:
                     f"Feedback refreshed: {assessed} assessed, "
                     f"accuracy={stats.get('accuracy_pct', 0)}%")
 
+    # ── LLMFilter protocol: outcome recording ─────────────────────────────
+
+    def record_darvas_outcome(
+        self,
+        *,
+        instrument: str,
+        decision_timestamp: str,
+        approved: bool,
+        entry_price: float,
+        exit_price: float,
+        exit_reason: str,
+        pnl: float,
+        breakout_price: float,
+    ) -> None:
+        """Assess a closed Darvas/Retest trade via the ledger. No-op if no ledger."""
+        if self._ledger is None:
+            return
+        try:
+            from ..replay.auto_assessor import assess_darvas_decision
+            assess_darvas_decision(
+                ledger=self._ledger,
+                instrument=instrument,
+                decision_timestamp=decision_timestamp,
+                approved=approved,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                exit_reason=exit_reason,
+                pnl=pnl,
+                breakout_price=breakout_price,
+            )
+        except Exception as e:  # never raise
+            logger.warning(f"record_darvas_outcome failed: {e}")
+
+    def record_orb_outcome(
+        self,
+        *,
+        instrument: str,
+        decision_date: str,
+        approved: bool,
+        entry_price: float,
+        exit_price: float,
+        exit_reason: str,
+        pnl: float,
+        range_high: float,
+        range_low: float,
+    ) -> None:
+        """Assess a closed ORB trade via the ledger. No-op if no ledger."""
+        if self._ledger is None:
+            return
+        try:
+            from ..replay.auto_assessor import assess_orb_decision
+            assess_orb_decision(
+                ledger=self._ledger,
+                instrument=instrument,
+                decision_date=decision_date,
+                approved=approved,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                exit_reason=exit_reason,
+                pnl=pnl,
+                range_high=range_high,
+                range_low=range_low,
+            )
+        except Exception as e:  # never raise
+            logger.warning(f"record_orb_outcome failed: {e}")
+
     def _build_orb_feedback(self, context: ORBSignalContext) -> str:
         """Build regime-filtered feedback for ORB signals."""
         if not self._ledger:

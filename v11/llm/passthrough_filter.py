@@ -88,3 +88,14 @@ class PassthroughFilter:
             target_price=0.0,
             reasoning="Mechanical approval -- LLM filter disabled",
         )
+
+    # ── LLMFilter protocol: outcome recording (no-ops) ─────────────────────
+
+    def record_darvas_outcome(self, **kwargs) -> None:
+        """No-op: passthrough filter has no ledger."""
+
+    def record_orb_outcome(self, **kwargs) -> None:
+        """No-op: passthrough filter has no ledger."""
+
+    def refresh_feedback(self) -> None:
+        """No-op: passthrough filter has no feedback table."""

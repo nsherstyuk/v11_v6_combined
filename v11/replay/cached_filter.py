@@ -117,3 +117,20 @@ class CachedFilter:
     @property
     def stats(self) -> dict:
         return {"hits": self._hits, "misses": self._misses, "size": len(self._cache)}
+
+    # ── LLMFilter protocol: outcome recording (delegates to inner) ────────
+
+    def record_darvas_outcome(self, **kwargs) -> None:
+        """Delegate to inner filter if it supports the method."""
+        if self._inner is not None and hasattr(self._inner, "record_darvas_outcome"):
+            self._inner.record_darvas_outcome(**kwargs)
+
+    def record_orb_outcome(self, **kwargs) -> None:
+        """Delegate to inner filter if it supports the method."""
+        if self._inner is not None and hasattr(self._inner, "record_orb_outcome"):
+            self._inner.record_orb_outcome(**kwargs)
+
+    def refresh_feedback(self) -> None:
+        """Delegate to inner filter if it supports the method."""
+        if self._inner is not None and hasattr(self._inner, "refresh_feedback"):
+            self._inner.refresh_feedback()

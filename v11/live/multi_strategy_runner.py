@@ -197,8 +197,11 @@ class MultiStrategyRunner:
                 auto_close_orphans=getattr(self._live_config, 'auto_close_orphans', False),
             )
 
-            # Wire auto-assessment callback for Darvas/Retest decisions
-            if self._llm_filter and hasattr(self._llm_filter, '_ledger'):
+            # Wire auto-assessment callback for Darvas/Retest decisions.
+            # All LLMFilter implementations expose record_darvas_outcome()
+            # and refresh_feedback() (no-op for stateless filters), so we
+            # always wire the callback without needing to sniff internals.
+            if self._llm_filter is not None:
                 trade_manager.on_trade_closed = self._make_assess_callback(
                     inst_config.pair_name)
             self._feeds[pair] = InstrumentFeed(
@@ -344,34 +347,33 @@ class MultiStrategyRunner:
             f"RUNNER: Seeded {len(bars)} bars on {pair_name}")
 
     def reset_daily(self) -> None:
-        """Reset all daily counters across risk manager and trade managers."""
+        """Reset daily counters and detector state at session boundary.
+
+        Resets risk/trade counters AND Darvas detector state machine.
+        This mirrors the backtest behavior where each session gets a
+        fresh detector — without it, the detector can get stuck.
+        """
         self._risk_manager.reset_daily()
         for feed in self._feeds.values():
             feed.trade_manager.reset_daily()
-        self._log.info("RUNNER: Daily reset complete")
+        for engine in self.engines:
+            if hasattr(engine, 'reset_session'):
+                engine.reset_session()
+        self._log.info("RUNNER: Daily reset complete (detectors reset)")
 
     def _make_assess_callback(self, instrument: str):
-        """Create a trade-closed callback for auto-assessing Darvas/Retest decisions."""
-        from ..llm.grok_filter import GrokFilter
-        from ..replay.auto_assessor import assess_darvas_decision
+        """Create a trade-closed callback for auto-assessing Darvas/Retest decisions.
 
+        Calls the LLMFilter's public record_darvas_outcome()/refresh_feedback()
+        methods — implementations without a ledger treat them as no-ops.
+        """
         def on_trade_closed(record):
-            # Find the ledger from the LLM filter
-            ledger = None
-            if isinstance(self._llm_filter, GrokFilter) and self._llm_filter._ledger:
-                ledger = self._llm_filter._ledger
-            elif hasattr(self._llm_filter, '_inner_filter'):
-                inner = self._llm_filter._inner_filter
-                if isinstance(inner, GrokFilter) and inner._ledger:
-                    ledger = inner._ledger
-
-            if ledger is None:
+            if self._llm_filter is None:
                 return
-
-            assess_darvas_decision(
-                ledger=ledger,
+            self._llm_filter.record_darvas_outcome(
                 instrument=instrument,
-                decision_timestamp=record.exit_time.isoformat() if record.exit_time else "",
+                decision_timestamp=(
+                    record.exit_time.isoformat() if record.exit_time else ""),
                 approved=True,  # trade was approved if it entered
                 entry_price=record.entry_price,
                 exit_price=record.exit_price,
@@ -379,14 +381,7 @@ class MultiStrategyRunner:
                 pnl=record.pnl,
                 breakout_price=record.entry_price,
             )
-
-            # Refresh feedback table
-            if isinstance(self._llm_filter, GrokFilter):
-                self._llm_filter.refresh_feedback()
-            elif hasattr(self._llm_filter, '_inner_filter'):
-                inner = self._llm_filter._inner_filter
-                if isinstance(inner, GrokFilter):
-                    inner.refresh_feedback()
+            self._llm_filter.refresh_feedback()
 
         return on_trade_closed
 

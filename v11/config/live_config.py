@@ -102,6 +102,9 @@ class LiveConfig:
     # Safety limits (CENTER — changes require approval)
     max_daily_trades: int = 20              # per strategy per day
     max_daily_loss: float = 500.0           # USD, combined portfolio limit
+    max_daily_loss_per_strategy: float = 0.0  # USD, optional per-strategy limit
+                                            # 0.0 (default) = disabled (combined only)
+                                            # e.g. 200.0 caps each strategy at $200/day
     max_concurrent_positions: int = 3       # across all instruments
     max_entry_drift_atr: float = 0.5        # max price drift (in ATR) during LLM latency
                                             # if current price moved > 0.5 ATR from

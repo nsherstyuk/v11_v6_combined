@@ -45,6 +45,7 @@ class RiskManager:
         max_daily_trades_per_strategy: int,
         max_concurrent_positions: int,
         log: logging.Logger,
+        max_daily_loss_per_strategy: float = 0.0,
     ):
         """
         Args:
@@ -53,10 +54,17 @@ class RiskManager:
             max_daily_trades_per_strategy: Max trades per strategy per day.
             max_concurrent_positions: Max total open positions across all instruments.
             log: Logger instance.
+            max_daily_loss_per_strategy: Optional per-strategy daily loss limit in USD.
+                            0.0 (default) disables the per-strategy limit, preserving
+                            original behavior where only the combined limit applies.
+                            When set > 0, a strategy whose daily_pnl drops below
+                            -max_daily_loss_per_strategy is paused while other
+                            strategies continue trading up to the combined limit.
         """
         self._max_daily_loss = max_daily_loss
         self._max_daily_trades = max_daily_trades_per_strategy
         self._max_positions = max_concurrent_positions
+        self._max_daily_loss_per_strategy = max_daily_loss_per_strategy
         self._log = log
 
         # Per-strategy stats
@@ -118,6 +126,14 @@ class RiskManager:
                 return (False,
                         f"{strategy_name} daily trade limit: "
                         f"{stats.daily_trades}/{self._max_daily_trades}")
+
+        # 5. Per-strategy daily loss limit (optional; 0.0 disables)
+        if stats and self._max_daily_loss_per_strategy > 0:
+            if stats.daily_pnl <= -self._max_daily_loss_per_strategy:
+                return (False,
+                        f"{strategy_name} daily loss limit: "
+                        f"${stats.daily_pnl:.2f} "
+                        f"<= -${self._max_daily_loss_per_strategy:.2f}")
 
         return (True, "")
 

@@ -76,6 +76,7 @@ class TradeManager:
         self.buy_ratio: float = 0.0
         self.llm_confidence: int = 0
         self.llm_reasoning: str = ""
+        self.entry_time: Optional[datetime] = None
 
         # IBKR fill tracking
         self._fill_entry_price: float = 0.0
@@ -122,6 +123,7 @@ class TradeManager:
         # Set trade state
         self.in_trade = True
         self.direction = direction
+        self.entry_time = datetime.now(timezone.utc)
         self.signal_entry_price = decision.entry_price
         self.stop_price = decision.stop_price
         self.target_price = decision.target_price
@@ -414,7 +416,7 @@ class TradeManager:
         )
 
         record = TradeRecord(
-            entry_time=datetime.now(timezone.utc),  # approximate
+            entry_time=self.entry_time or datetime.now(timezone.utc),
             exit_time=datetime.now(timezone.utc),
             direction=direction,
             instrument=self._inst.pair_name,
@@ -471,6 +473,7 @@ class TradeManager:
         self.buy_ratio = 0.0
         self.llm_confidence = 0
         self.llm_reasoning = ""
+        self.entry_time = None
         self._fill_entry_price = 0.0
         self._entry_commission = 0.0
         self._entry_trade = None
@@ -555,7 +558,7 @@ class TradeManager:
         # Log the emergency close as a trade record
         try:
             record = TradeRecord(
-                entry_time=datetime.now(timezone.utc),
+                entry_time=self.entry_time or datetime.now(timezone.utc),
                 exit_time=datetime.now(timezone.utc),
                 direction=self.direction,
                 instrument=self._inst.pair_name,

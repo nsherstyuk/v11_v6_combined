@@ -412,3 +412,51 @@ class TestEmergencyClose:
         tm.emergency_close("TEST")
         assert len(records) == 1
         assert records[0].exit_reason == "EMERGENCY"
+
+
+# ── 14. Entry time tracking (regression for 2026-04-16 bug) ──────────────────
+
+class TestEntryTime:
+    """Regression tests: TradeRecord.entry_time used to be set to `now()` at
+    exit, losing the true entry time. enter_trade() must capture the entry
+    time and _execute_exit()/emergency_close() must preserve it."""
+
+    def test_entry_time_captured_on_enter(self, tm):
+        assert tm.entry_time is None
+        before = datetime.now(timezone.utc)
+        tm.enter_trade(_make_signal(), _make_decision(), 0.6, 100)
+        after = datetime.now(timezone.utc)
+        assert tm.entry_time is not None
+        assert before <= tm.entry_time <= after
+
+    def test_entry_time_cleared_after_exit(self, tm):
+        tm.enter_trade(_make_signal(), _make_decision(), 0.6, 100)
+        tm.check_exit(current_price=1.0990, bar_high=1.1010,
+                      bar_low=1.0990, current_bar_index=110)
+        assert tm.entry_time is None
+
+    def test_record_entry_time_precedes_exit_time(self, tm):
+        """Trade record should show entry_time strictly before exit_time."""
+        import time
+        tm.enter_trade(_make_signal(), _make_decision(), 0.6, 100)
+        entry_ts = tm.entry_time
+        time.sleep(0.01)  # ensure measurable delta
+        record = tm.check_exit(current_price=1.0990, bar_high=1.1010,
+                               bar_low=1.0990, current_bar_index=110)
+        assert record is not None
+        assert record.entry_time == entry_ts
+        assert record.entry_time < record.exit_time
+
+    def test_emergency_close_preserves_entry_time(self, mock_conn, log, tmp_path):
+        tm = TradeManager(
+            conn=mock_conn, inst=EURUSD_INSTRUMENT, log=log,
+            trade_log_dir=tmp_path, dry_run=True, max_hold_bars=120,
+        )
+        records = []
+        tm.on_trade_closed = lambda r: records.append(r)
+        tm.enter_trade(_make_signal(), _make_decision(), 0.6, 100)
+        entry_ts = tm.entry_time
+        tm.emergency_close("TEST")
+        assert len(records) == 1
+        assert records[0].entry_time == entry_ts
+        assert records[0].entry_time <= records[0].exit_time

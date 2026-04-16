@@ -24,7 +24,6 @@ from ..live.level_retest_engine import LevelRetestEngine
 from ..live.risk_manager import RiskManager
 from ..llm.passthrough_filter import PassthroughFilter
 from .replay_orb import ReplayORBAdapter
-from .auto_assessor import assess_orb_decision, assess_darvas_decision
 
 from .config import ReplayConfig
 from .stub_connection import StubIBKRConnection
@@ -405,23 +404,13 @@ class ReplayRunner:
 
     def _assess_orb_trade(self, instrument: str, engine: ReplayORBAdapter,
                           rec: dict, bar_date: str) -> None:
-        """Assess ORB LLM decision after trade completes."""
-        from ..llm.grok_filter import GrokFilter
+        """Assess ORB LLM decision after trade completes.
 
-        # Get the ledger from the LLM filter
-        ledger = None
-        if isinstance(self._llm_filter, GrokFilter) and self._llm_filter._ledger:
-            ledger = self._llm_filter._ledger
-        elif isinstance(self._llm_filter, CachedFilter):
-            inner = getattr(self._llm_filter, '_inner_filter', None)
-            if isinstance(inner, GrokFilter) and inner._ledger:
-                ledger = inner._ledger
-
-        if ledger is None:
+        Uses the public LLMFilter protocol — no-op for stateless filters.
+        """
+        if self._llm_filter is None:
             return
-
-        assess_orb_decision(
-            ledger=ledger,
+        self._llm_filter.record_orb_outcome(
             instrument=instrument,
             decision_date=bar_date,
             approved=engine._llm_approved_today,
@@ -432,30 +421,19 @@ class ReplayRunner:
             range_high=rec.get("range_high", 0),
             range_low=rec.get("range_low", 0),
         )
-
-        # Refresh feedback table so next LLM call sees updated history
-        self._refresh_feedback()
+        self._llm_filter.refresh_feedback()
 
     def _assess_darvas_trade(self, instrument: str, engine,
                              pnl_delta: float, bar_date: str,
                              breakout_price: float = 0.0) -> None:
-        """Assess Darvas/Retest LLM decision after trade completes."""
-        from ..llm.grok_filter import GrokFilter
+        """Assess Darvas/Retest LLM decision after trade completes.
 
-        ledger = None
-        if isinstance(self._llm_filter, GrokFilter) and self._llm_filter._ledger:
-            ledger = self._llm_filter._ledger
-        elif isinstance(self._llm_filter, CachedFilter):
-            inner = getattr(self._llm_filter, '_inner_filter', None)
-            if isinstance(inner, GrokFilter) and inner._ledger:
-                ledger = inner._ledger
-
-        if ledger is None:
+        Uses the public LLMFilter protocol — no-op for stateless filters.
+        """
+        if self._llm_filter is None:
             return
-
         tm = self._trade_managers[instrument]
-        assess_darvas_decision(
-            ledger=ledger,
+        self._llm_filter.record_darvas_outcome(
             instrument=instrument,
             decision_timestamp=bar_date,
             approved=True,  # if we got here, the trade was approved
@@ -465,19 +443,12 @@ class ReplayRunner:
             pnl=pnl_delta,
             breakout_price=breakout_price,
         )
-
-        self._refresh_feedback()
+        self._llm_filter.refresh_feedback()
 
     def _refresh_feedback(self) -> None:
         """Refresh LLM feedback table from decision ledger."""
-        from ..llm.grok_filter import GrokFilter
-
-        if isinstance(self._llm_filter, GrokFilter):
+        if self._llm_filter is not None:
             self._llm_filter.refresh_feedback()
-        elif isinstance(self._llm_filter, CachedFilter):
-            inner = getattr(self._llm_filter, '_inner_filter', None)
-            if isinstance(inner, GrokFilter):
-                inner.refresh_feedback()
 
     def _write_summary(self, result: dict) -> None:
         """Write human-readable summary file."""

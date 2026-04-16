@@ -208,3 +208,91 @@ class TestGetStatus:
         assert 'open_positions' in status
         assert 'strategies' in status
         assert status['open_positions'] == {'EURUSD': 'Darvas'}
+
+
+# ── Per-strategy daily loss limit (optional, added 2026-04-16) ─────────────
+
+class TestPerStrategyDailyLoss:
+    """New optional feature: a strategy whose daily PnL drops below
+    -max_daily_loss_per_strategy is paused, while other strategies continue
+    trading (subject to the combined limit)."""
+
+    def test_default_disabled_preserves_old_behavior(self, rm):
+        """Default rm fixture uses max_daily_loss_per_strategy=0.0 (disabled).
+        A strategy can lose arbitrarily much up to the combined limit."""
+        rm.record_trade_entry("EURUSD", "Darvas")
+        rm.record_trade_exit("EURUSD", "Darvas", -450.0)  # big single loss
+        allowed, _reason = rm.can_trade("EURUSD", "Darvas")
+        # Strategy lost $450 but combined limit is $500, per-strategy disabled
+        assert allowed is True
+
+    def test_blocks_strategy_exceeding_its_own_limit(self, log):
+        rm = RiskManager(
+            max_daily_loss=1000.0,
+            max_daily_trades_per_strategy=10,
+            max_concurrent_positions=3,
+            log=log,
+            max_daily_loss_per_strategy=200.0,
+        )
+        rm.record_trade_entry("EURUSD", "Darvas")
+        rm.record_trade_exit("EURUSD", "Darvas", -250.0)  # exceeds $200 limit
+        allowed, reason = rm.can_trade("EURUSD", "Darvas")
+        assert allowed is False
+        assert "Darvas" in reason
+        assert "daily loss limit" in reason
+
+    def test_does_not_block_other_strategies(self, log):
+        """One strategy hitting its per-strategy limit must not pause others."""
+        rm = RiskManager(
+            max_daily_loss=1000.0,
+            max_daily_trades_per_strategy=10,
+            max_concurrent_positions=3,
+            log=log,
+            max_daily_loss_per_strategy=200.0,
+        )
+        rm.record_trade_entry("EURUSD", "Darvas")
+        rm.record_trade_exit("EURUSD", "Darvas", -250.0)  # Darvas paused
+        # ORB has lost nothing, must still be allowed
+        allowed, reason = rm.can_trade("XAUUSD", "ORB")
+        assert allowed is True
+        assert reason == ""
+
+    def test_exact_limit_blocks(self, log):
+        rm = RiskManager(
+            max_daily_loss=1000.0,
+            max_daily_trades_per_strategy=10,
+            max_concurrent_positions=3,
+            log=log,
+            max_daily_loss_per_strategy=200.0,
+        )
+        rm.record_trade_entry("EURUSD", "Darvas")
+        rm.record_trade_exit("EURUSD", "Darvas", -200.0)  # exactly at limit
+        allowed, _reason = rm.can_trade("EURUSD", "Darvas")
+        assert allowed is False  # <= comparison includes equality
+
+    def test_below_limit_allowed(self, log):
+        rm = RiskManager(
+            max_daily_loss=1000.0,
+            max_daily_trades_per_strategy=10,
+            max_concurrent_positions=3,
+            log=log,
+            max_daily_loss_per_strategy=200.0,
+        )
+        rm.record_trade_entry("EURUSD", "Darvas")
+        rm.record_trade_exit("EURUSD", "Darvas", -150.0)  # below limit
+        allowed, _reason = rm.can_trade("EURUSD", "Darvas")
+        assert allowed is True
+
+    def test_reset_daily_clears_per_strategy_loss(self, log):
+        rm = RiskManager(
+            max_daily_loss=1000.0,
+            max_daily_trades_per_strategy=10,
+            max_concurrent_positions=3,
+            log=log,
+            max_daily_loss_per_strategy=200.0,
+        )
+        rm.record_trade_entry("EURUSD", "Darvas")
+        rm.record_trade_exit("EURUSD", "Darvas", -250.0)
+        assert rm.can_trade("EURUSD", "Darvas")[0] is False
+        rm.reset_daily()
+        assert rm.can_trade("EURUSD", "Darvas")[0] is True

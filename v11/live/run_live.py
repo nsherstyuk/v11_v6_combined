@@ -206,6 +206,7 @@ class V11LiveTrader:
             max_daily_trades_per_strategy=live_cfg.max_daily_trades,
             max_concurrent_positions=live_cfg.max_concurrent_positions,
             log=log,
+            max_daily_loss_per_strategy=live_cfg.max_daily_loss_per_strategy,
         )
 
         # Multi-strategy runner
@@ -341,6 +342,12 @@ class V11LiveTrader:
             self._shutdown = True
         signal_mod.signal(signal_mod.SIGINT, on_signal)
         signal_mod.signal(signal_mod.SIGTERM, on_signal)
+
+        # Clean up stale emergency state from previous session
+        stale_state = ROOT / "v11" / "live" / "state" / "emergency_shutdown.json"
+        if stale_state.exists():
+            stale_state.unlink()
+            self.log.info("Removed stale emergency_shutdown.json from previous session")
 
         # Initial connection with extended retries (Gateway may still be starting/authenticating)
         connected = False
@@ -513,7 +520,26 @@ class V11LiveTrader:
                     elif not llm_done:
                         proximity = " | LLM gate pending (next bar)"
                     else:
-                        proximity = " | brackets eligible"
+                        resting = s.get('has_resting_entries', False)
+                        d2h = s.get('dist_to_high')
+                        d2l = s.get('dist_to_low')
+                        vel = s.get('velocity', 0)
+                        vel_thresh = s.get('velocity_threshold', 0)
+                        ticks_3m = s.get('tick_count_3m', 0)
+                        if resting and price and d2h is not None:
+                            proximity = (f" | orders LIVE buy@high sell@low"
+                                         f" price={price:.2f}"
+                                         f" dist_high={d2h:+.2f}"
+                                         f" dist_low={d2l:+.2f}")
+                        elif vel_thresh > 0:
+                            vel_pct = vel / vel_thresh * 100 if vel_thresh else 0
+                            proximity = (f" | vel={vel:.0f}/{vel_thresh:.0f}"
+                                         f"({vel_pct:.0f}%)"
+                                         f" ticks3m={ticks_3m}"
+                                         f" dist_high={d2h:+.2f}"
+                                         f" dist_low={d2l:+.2f}")
+                        else:
+                            proximity = " | brackets eligible"
                 elif state == 'DONE_TODAY':
                     if llm_done:
                         proximity = " | LLM rejected today"

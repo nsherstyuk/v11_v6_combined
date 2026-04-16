@@ -172,7 +172,7 @@ class ORBAdapter:
 
         cfg = self._v6_config
 
-        # ── Window closed → mark done ─────────────────────────────
+        # ── Window closed -- mark done ─────────────────────────────
         if (now.hour >= cfg.trade_end_hour
                 and self._strategy.state in (
                     StrategyState.IDLE, StrategyState.RANGE_READY)):
@@ -198,9 +198,9 @@ class ORBAdapter:
         # ── Risk gate ─────────────────────────────────────────────
         # Block strategy in RANGE_READY (pre-bracket) if risk manager
         # disallows new trades. Other states must flow freely:
-        #   IDLE → needs to see ticks for range setup
-        #   ORDERS_PLACED → needs to monitor velocity / max pending
-        #   IN_TRADE → needs to manage position (BE, time exit, EOD)
+        #   IDLE -- needs to see ticks for range setup
+        #   ORDERS_PLACED -- needs to monitor velocity / max pending
+        #   IN_TRADE -- needs to manage position (BE, time exit, EOD)
         if self._strategy.state == StrategyState.RANGE_READY:
             allowed, reason = self._risk_manager.can_trade(
                 self._instrument, self.STRATEGY_NAME)
@@ -216,6 +216,29 @@ class ORBAdapter:
                 return  # Hold at RANGE_READY until on_bar evaluates
             if self._llm_gate_pending:
                 return  # Still waiting for on_bar to evaluate
+
+        # ── Stale breakout check ────────────────────────────────────
+        # V6 only checks this AFTER velocity passes, which creates a
+        # deadlock: velocity never passes → stale breakout never fires.
+        # Check here so we don't sit in RANGE_READY forever with price
+        # already outside the range.
+        if (self._strategy.state == StrategyState.RANGE_READY
+                and self._llm_evaluated_today
+                and self._strategy.range):
+            mid_price = None
+            if self._context._last_bid and self._context._last_ask:
+                mid_price = (self._context._last_bid + self._context._last_ask) / 2
+            if mid_price is not None:
+                r = self._strategy.range
+                if mid_price > r.high or mid_price < r.low:
+                    self._log.info(
+                        f"ORB stale breakout: price={mid_price:.{self._v6_config.price_decimals}f} "
+                        f"outside range "
+                        f"[{r.low:.{self._v6_config.price_decimals}f}-"
+                        f"{r.high:.{self._v6_config.price_decimals}f}], "
+                        f"skipping (velocity never reached)")
+                    self._strategy.state = StrategyState.DONE_TODAY
+                    return
 
         # ── Drive strategy ────────────────────────────────────────
         # Log state transitions for diagnostics
@@ -275,6 +298,23 @@ class ORBAdapter:
             dist_to_high = current_price - s.range.high
             dist_to_low = current_price - s.range.low
 
+        # Velocity info for diagnostics
+        from datetime import datetime as _dt, timezone as _tz
+        now_utc = _dt.now(tz=_tz.utc).replace(microsecond=0)
+        velocity = 0.0
+        tick_count = 0
+        if cfg.velocity_filter_enabled:
+            velocity = self._context.get_velocity(
+                cfg.velocity_lookback_minutes, now_utc)
+            cutoff = now_utc - __import__('datetime').timedelta(
+                minutes=cfg.velocity_lookback_minutes)
+            tick_count = sum(
+                1 for t in self._context.tick_buffer if t.timestamp >= cutoff)
+
+        # Resting order info
+        has_resting = self._execution.has_resting_entries()
+        order_ids = self._execution.get_order_ids()
+
         return {
             "strategy_name": self.STRATEGY_NAME,
             "pair_name": self._instrument,
@@ -294,6 +334,12 @@ class ORBAdapter:
             "current_price": current_price,
             "dist_to_high": dist_to_high,
             "dist_to_low": dist_to_low,
+            "has_resting_entries": has_resting,
+            "buy_entry_id": order_ids.get("buy_entry_id", 0),
+            "sell_entry_id": order_ids.get("sell_entry_id", 0),
+            "velocity": velocity,
+            "velocity_threshold": cfg.velocity_threshold if cfg.velocity_filter_enabled else 0,
+            "tick_count_3m": tick_count,
             "range_start_hour": cfg.range_start_hour,
             "range_end_hour": cfg.range_end_hour,
             "trade_end_hour": cfg.trade_end_hour,
@@ -314,7 +360,7 @@ class ORBAdapter:
             self._risk_manager.record_trade_entry(
                 self._instrument, self.STRATEGY_NAME)
             self._log.info(
-                f"ORB ENTRY: {fill.direction} @ {fill.price} → "
+                f"ORB ENTRY: {fill.direction} @ {fill.price} -- "
                 f"risk manager notified")
 
         elif fill.reason in ("SL", "TP", "BE", "MARKET", "CLOSED"):
@@ -326,7 +372,7 @@ class ORBAdapter:
                 self._instrument, self.STRATEGY_NAME, pnl_usd)
             self._log.info(
                 f"ORB EXIT: {fill.reason} @ {fill.price} "
-                f"PnL=${pnl_usd:+.2f} → risk manager notified")
+                f"PnL=${pnl_usd:+.2f} -- risk manager notified")
 
             # Auto-assess ORB decision
             self._assess_exit(fill, pnl_usd)
@@ -341,27 +387,21 @@ class ORBAdapter:
         return 0.0
 
     def _assess_exit(self, fill: Fill, pnl_usd: float) -> None:
-        """Auto-assess the LLM decision after an ORB trade exits."""
+        """Auto-assess the LLM decision after an ORB trade exits.
+
+        Uses the public LLMFilter protocol — no-op for stateless filters.
+        """
         if not self._llm_filter:
-            return
-
-        from ..llm.grok_filter import GrokFilter
-        ledger = None
-        if isinstance(self._llm_filter, GrokFilter) and self._llm_filter._ledger:
-            ledger = self._llm_filter._ledger
-
-        if ledger is None:
             return
 
         rng = self._strategy.range
         range_high = rng.high if rng else 0
         range_low = rng.low if rng else 0
 
-        from ..replay.auto_assessor import assess_orb_decision
-        assess_orb_decision(
-            ledger=ledger,
+        self._llm_filter.record_orb_outcome(
             instrument=self._instrument,
-            decision_date=fill.timestamp.strftime("%Y-%m-%d") if fill.timestamp else "",
+            decision_date=(
+                fill.timestamp.strftime("%Y-%m-%d") if fill.timestamp else ""),
             approved=self._llm_evaluated_today,  # True = LLM allowed brackets
             entry_price=self._strategy.entry_price,
             exit_price=fill.price,
@@ -370,10 +410,7 @@ class ORBAdapter:
             range_high=range_high,
             range_low=range_low,
         )
-
-        # Refresh feedback table for next LLM call
-        if isinstance(self._llm_filter, GrokFilter):
-            self._llm_filter.refresh_feedback()
+        self._llm_filter.refresh_feedback()
 
     # ── LLM gate ──────────────────────────────────────────────────
 

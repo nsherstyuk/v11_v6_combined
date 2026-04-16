@@ -186,14 +186,11 @@ class DarvasDetector:
         else:
             self._bars_since_new_high += 1
             if self._bars_since_new_high >= self._config.top_confirm_bars:
-                # Top confirmed — start tracking bottom
+                # Top confirmed — start tracking bottom.
+                # We only have the current bar, so the bottom candidate starts
+                # at this bar's low and is tracked forward.
                 self._confirmed_top = self._candidate_top
                 self._confirmed_top_bar = self._candidate_top_bar
-                self._candidate_bottom = min(
-                    bar.low, self._candidate_top  # initialize with current bar
-                )
-                # Scan back: the bottom candidate is the lowest low since the top
-                # Since we only have the current bar, we track going forward
                 self._candidate_bottom = bar.low
                 self._candidate_bottom_bar = self._bar_index
                 self._bars_since_new_low = 0
@@ -392,9 +389,21 @@ class DarvasDetector:
             self._atr = self._atr * (1 - alpha) + tr * alpha
 
     def reset(self) -> None:
-        """Full reset — clear all state. Used between trading sessions."""
+        """Full reset — clear all state including ATR. Used by backtester."""
+        self.reset_formation()
+        self._atr = 0.0
+        self._atr_count = 0
+        self._prev_close = 0.0
+
+    def reset_formation(self) -> None:
+        """Reset box formation state only, preserving ATR.
+
+        Used at session boundaries in live trading. Unlike full reset(),
+        this keeps ATR warm so the detector can immediately evaluate
+        new box formations without a 60-bar warm-up period.
+        """
         self._state = self.SEEKING_TOP
-        self._bar_index = -1
+        self._bar_index = max(self._bar_index, 0)  # keep bar index advancing
         self._candidate_top = -math.inf
         self._candidate_top_bar = 0
         self._bars_since_new_high = 0
@@ -403,11 +412,8 @@ class DarvasDetector:
         self._candidate_bottom = math.inf
         self._candidate_bottom_bar = 0
         self._bars_since_new_low = 0
-        self._formation_start = 0
+        self._formation_start = self._bar_index
         self._active_box = None
         self._breakout_direction = None
         self._breakout_confirm_count = 0
         self._breakout_price = 0.0
-        self._atr = 0.0
-        self._atr_count = 0
-        self._prev_close = 0.0
