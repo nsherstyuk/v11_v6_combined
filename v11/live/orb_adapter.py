@@ -177,6 +177,11 @@ class ORBAdapter:
         if today_str != self._current_date:
             self._reset_daily(today_str, now)
 
+        # ── Skip configured weekdays (e.g. Wednesday=2) ───────────
+        if (self._v6_config.skip_weekdays
+                and now.weekday() in self._v6_config.skip_weekdays):
+            return
+
         # ── Throttle to poll interval ─────────────────────────────
         if self._last_poll_time is not None:
             elapsed = (now - self._last_poll_time).total_seconds()

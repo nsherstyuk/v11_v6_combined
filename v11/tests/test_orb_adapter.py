@@ -377,7 +377,79 @@ class TestRangeCalculation:
         adapter._context.calculate_daily_range.assert_not_called()
 
 
-# ── 8. MultiStrategyRunner integration ───────────────────────────────────────
+# ── 8. skip_weekdays enforcement ─────────────────────────────────────────────
+
+class TestSkipWeekdays:
+    """2025-01-15 is a Wednesday (weekday=2). 2025-01-14 is Tuesday. 2025-01-16 is Thursday."""
+
+    def _make_adapter_with_skip(self, risk_manager, log, skip_weekdays=(2,)):
+        """Create adapter with skip_weekdays configured."""
+        ib = _mock_ib()
+        contract = _mock_contract()
+        v6_config = _make_v6_config(skip_weekdays=skip_weekdays)
+        return ORBAdapter(
+            ib=ib, contract=contract, v6_config=v6_config,
+            risk_manager=risk_manager, log=log,
+            dry_run=True, poll_interval=0.0,
+        )
+
+    def test_on_price_returns_early_on_skip_day(self, risk_manager, log):
+        """on_price must return immediately on configured skip day."""
+        adapter = self._make_adapter_with_skip(risk_manager, log)
+        adapter._current_date = "2025-01-15"  # Wednesday
+
+        # Wednesday 2025-01-15 at 10:00 UTC
+        wednesday = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        adapter.on_price(2650.0, wednesday)
+
+        # poll time should not advance — on_price returned before the throttle check
+        assert adapter._last_poll_time is None
+
+    def test_on_price_processes_normally_on_tuesday(self, risk_manager, log):
+        """on_price must process normally on non-skip days."""
+        adapter = self._make_adapter_with_skip(risk_manager, log)
+        adapter._current_date = "2025-01-14"  # Tuesday
+
+        tuesday = datetime(2025, 1, 14, 10, 0, 0, tzinfo=timezone.utc)
+        adapter.on_price(2650.0, tuesday)
+
+        assert adapter._last_poll_time == tuesday
+
+    def test_on_price_processes_normally_on_thursday(self, risk_manager, log):
+        """on_price must process normally on non-skip days."""
+        adapter = self._make_adapter_with_skip(risk_manager, log)
+        adapter._current_date = "2025-01-16"  # Thursday
+
+        thursday = datetime(2025, 1, 16, 10, 0, 0, tzinfo=timezone.utc)
+        adapter.on_price(2650.0, thursday)
+
+        assert adapter._last_poll_time == thursday
+
+    def test_empty_skip_weekdays_trades_all_days(self, risk_manager, log):
+        """Empty skip_weekdays means no days are skipped."""
+        adapter = self._make_adapter_with_skip(risk_manager, log, skip_weekdays=())
+        adapter._current_date = "2025-01-15"  # Wednesday
+
+        wednesday = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        adapter.on_price(2650.0, wednesday)
+
+        assert adapter._last_poll_time == wednesday
+
+    def test_daily_reset_still_fires_on_skip_day(self, risk_manager, log):
+        """Daily reset must fire even on skip days (cancels lingering orders)."""
+        adapter = self._make_adapter_with_skip(risk_manager, log)
+        adapter._current_date = "2025-01-14"  # Tuesday — so Wednesday triggers reset
+
+        wednesday = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        adapter.on_price(2650.0, wednesday)
+
+        # Reset fired: date changed
+        assert adapter._current_date == "2025-01-15"
+        # But poll time not set — skipped after reset
+        assert adapter._last_poll_time is None
+
+
+# ── 9. MultiStrategyRunner integration ───────────────────────────────────────
 
 class TestRunnerIntegration:
     def test_add_orb_strategy_creates_adapter(self, risk_manager, log, tmp_path):
