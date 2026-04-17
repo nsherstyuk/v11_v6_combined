@@ -173,7 +173,8 @@ def _max_drawdown(rs: List[float]) -> float:
     return max_dd
 
 
-def _metrics(trades: List[dict]) -> dict:
+def _metrics(trades: List[dict], slippage_pts: float = 0.0) -> dict:
+    """Compute trade metrics. slippage_pts deducts 2× per trade (round-trip)."""
     if not trades:
         return {"N": 0, "WR": 0.0, "AvgR": 0.0, "PF": 0.0, "MaxDD": 0.0}
 
@@ -182,7 +183,8 @@ def _metrics(trades: List[dict]) -> dict:
         rng = t["range_high"] - t["range_low"]
         if rng <= 0:
             continue  # skip degenerate
-        rs.append(t["pnl"] / rng)
+        adjusted_pnl = t["pnl"] - 2 * slippage_pts
+        rs.append(adjusted_pnl / rng)
 
     if not rs:
         return {"N": 0, "WR": 0.0, "AvgR": 0.0, "PF": 0.0, "MaxDD": 0.0}
@@ -300,17 +302,24 @@ def main():
     print(f"  Gap lookup: {len(gap_lookup)} dates, "
           f"{sum(1 for g in gap_lookup.values() if g.vol_passes)} vol_pass days")
 
-    # ── Run variants ─────────────────────────────────────────────────────
+    # ── Config variants ───────────────────────────────────────────────────
+    from dataclasses import replace
+    cfg_vel_off  = replace(BASE_CFG, velocity_filter_enabled=False)
+    cfg_wed_all  = replace(BASE_CFG, skip_weekdays=())  # include Wednesday
+
     variants = [
-        ("velocity=tick_count, gap=OFF", False),
-        ("velocity=tick_count, gap=ON",  True),
+        ("velocity=ON,  gap=OFF",              BASE_CFG,    False),
+        ("velocity=ON,  gap=ON",               BASE_CFG,    True),
+        ("velocity=OFF, gap=OFF",              cfg_vel_off, False),
+        ("velocity=OFF, gap=ON",               cfg_vel_off, True),
+        ("velocity=ON,  gap=ON,  Wed=include", cfg_wed_all, True),
     ]
 
     results = {}
-    for label, gap_filter in variants:
+    for label, cfg, gap_filter in variants:
         print(f"Running: {label}…", flush=True)
         trades = asyncio.run(
-            _run_config(BASE_CFG, all_bars, gap_filter, gap_lookup, log)
+            _run_config(cfg, all_bars, gap_filter, gap_lookup, log)
         )
         print(f"  {len(trades)} trades total")
         results[label] = trades
@@ -323,19 +332,18 @@ def main():
                if datetime.fromisoformat(t["timestamp"]) >= IS_START]
         return is_, oos
 
-    # ── Print output ──────────────────────────────────────────────────────
-    W = 100
+    # ── Print IS/OOS summary table ────────────────────────────────────────
+    W = 106
     print()
     print("=" * W)
     print("  ORB XAUUSD — IS/OOS RESULTS")
     print("=" * W)
-    hdr = (f"  {'Config':<32} | {'IS_N':>5} {'IS_WR':>6} {'IS_AvgR':>8} | "
+    hdr = (f"  {'Config':<38} | {'IS_N':>5} {'IS_WR':>6} {'IS_AvgR':>8} | "
            f"{'OOS_N':>6} {'/yr':>5} {'OOS_WR':>7} {'OOS_AvgR':>9}")
     print(hdr)
-    sep = "  " + "-" * 32 + "+-" + "-" * 23 + "+-" + "-" * 31
+    sep = "  " + "-" * 38 + "+-" + "-" * 23 + "+-" + "-" * 31
     print(sep)
 
-    best_label = None
     for label, trades in results.items():
         is_trades, oos_trades = _split(trades)
         im = _metrics(is_trades)
@@ -343,12 +351,10 @@ def main():
         oos_per_yr = om["N"] / OOS_YEARS if OOS_YEARS else 0
 
         print(
-            f"  {label:<32} | "
+            f"  {label:<38} | "
             f"{im['N']:>5} {im['WR']:>6.1f} {im['AvgR']:>8.3f} | "
             f"{om['N']:>6} {oos_per_yr:>5.1f} {om['WR']:>7.1f} {om['AvgR']:>9.3f}"
         )
-        if best_label is None:
-            best_label = label  # use gap=OFF for year-by-year
 
     # ── Year-by-year OOS ──────────────────────────────────────────────────
     for label, trades in results.items():
@@ -369,7 +375,6 @@ def main():
                 f"{pf_str:>6} {m['MaxDD']:>7.3f}"
             )
 
-        # Overall OOS
         m_all = _metrics(oos_trades)
         pf_str = f"{m_all['PF']:.2f}" if m_all["PF"] != float("inf") else "  inf"
         print("  " + "-" * 50)
@@ -377,6 +382,43 @@ def main():
             f"  {'TOTAL':<12} {m_all['N']:>5} {m_all['WR']:>7.1f} {m_all['AvgR']:>8.3f} "
             f"{pf_str:>6} {m_all['MaxDD']:>7.3f}"
         )
+
+    # ── Slippage stress test (gap=ON OOS only) ────────────────────────────
+    gap_on_label = "velocity=ON,  gap=ON"
+    gap_on_trades = results.get(gap_on_label, [])
+    _, gap_on_oos = _split(gap_on_trades)
+
+    if gap_on_oos:
+        print()
+        print("=" * W)
+        print("  SLIPPAGE STRESS TEST (velocity=ON, gap=ON, OOS)")
+        print("=" * W)
+        print(f"  {'Slippage/side':>14}  {'N':>5}  {'WR%':>6}  {'AvgR':>8}  {'PF':>6}")
+        print("  " + "-" * 46)
+        for slip in [0.0, 0.1, 0.2, 0.3, 0.5]:
+            m = _metrics(gap_on_oos, slippage_pts=slip)
+            pf_str = f"{m['PF']:.2f}" if m["PF"] != float("inf") else "   inf"
+            print(
+                f"  {slip:>13.1f}  {m['N']:>5}  {m['WR']:>6.1f}  "
+                f"{m['AvgR']:>8.3f}  {pf_str:>6}"
+            )
+
+    # ── Direction breakdown (gap=ON OOS) ─────────────────────────────────
+    if gap_on_oos:
+        print()
+        print("=" * W)
+        print("  DIRECTION BREAKDOWN (velocity=ON, gap=ON, OOS)")
+        print("=" * W)
+        print(f"  {'Direction':<12}  {'N':>5}  {'WR%':>6}  {'AvgR':>8}  {'PF':>6}")
+        print("  " + "-" * 42)
+        for direction in ("LONG", "SHORT"):
+            dir_trades = [t for t in gap_on_oos if t.get("direction") == direction]
+            m = _metrics(dir_trades)
+            pf_str = f"{m['PF']:.2f}" if m["PF"] != float("inf") else "   inf"
+            print(
+                f"  {direction:<12}  {m['N']:>5}  {m['WR']:>6.1f}  "
+                f"{m['AvgR']:>8.3f}  {pf_str:>6}"
+            )
 
     print()
     print("Done.")
