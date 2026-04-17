@@ -1,7 +1,7 @@
 # Project Status — All Trading Systems
 
-**Last updated:** 2026-04-12 ET (Code review fixes: 2 critical crash bugs, 4 important issues, 7 suggestions, 20 new tests)  
-**Author:** Claude Opus 4.6 (AI pair programmer)
+**Last updated:** 2026-04-16 ET (ORB hardening: tick_count fix, skip_weekdays, stress-test backtest, Darvas disabled)  
+**Author:** Cascade + Claude Opus 4.6 + Claude Sonnet 4.6 (AI pair programmers)
 
 ---
 
@@ -36,6 +36,9 @@ docs/
     └── 2026-04-13_llm_model_comparison.md ← LLM model comparison (5 models), DeepSeek V3 winner, OpenRouter support
     └── 2026-04-13_llm_filtering_enhancements.md ← LLM filtering: expanded history, regime-filtered feedback, auto-assessment
     └── 2026-04-12_code_review_fixes_session.md ← Code review: 2 critical bugs, 4 important fixes, 20 new tests
+    └── 2026-04-14_ibkr_auto_reconnect_plan.md ← IBKR auto-reconnect research + plan (Phase A-C)
+    └── 2026-04-14_auto_reconnect_session.md ← Phase B implemented: retry limits, emergency close, staleness, orphans, broker sync, session reset, GatewayManager
+    └── 2026-04-16_dashboard_and_orb_debug_session.md ← Streamlit dashboard, 4H level detection fix, ORB velocity/stale-breakout debugging
     └── ...future sessions...
 ```
 
@@ -147,7 +150,7 @@ utils/logger.py  — Rotating file + console logger
 ## Project 3: V11 (Multi-Strategy Portfolio — Build Phase)
 
 **Location:** `C:\ibkr_grok-_wing_agent\v11\`  
-**Status:** ✅ **LIVE on paper account** (port 4002). Three strategies across two instruments: EURUSD Darvas+SMA (~15/yr), EURUSD 4H Level Retest (~22/yr), XAUUSD ORB (from v6, ~150/yr). Combined ~187 trades/yr. LLM filtering with DeepSeek V3 + regime-filtered feedback loop. Python 3.14 compatibility patched.
+**Status:** ✅ **LIVE on paper account** (port 4002). **One active strategy: XAUUSD ORB (from v6).** Darvas and 4H Level Retest disabled — no reproducible OOS edge on current EURUSD data (modified 2026-04-13, breaking prior research). ORB hardened: live/backtest divergences closed, stress-test backtest extended. See `docs/journal/2026-04-16_strategy_review_and_plan.md` for full context.  
 **Purpose:** Multi-strategy portfolio combining rule-based breakouts + volume imbalance + optional Grok LLM filter for FX/commodities.
 
 ### LLM Filtering Results (XAUUSD Replay, Jan-Apr 2026, DeepSeek V3)
@@ -224,14 +227,14 @@ The Darvas strategy has higher per-trade quality. The 4H level strategy has 10x 
 | LLM protocol | `v11/llm/base.py` | ✅ Complete |
 | LLM models (CENTER) | `v11/llm/models.py` | ✅ Complete, 12 tests |
 | Grok filter | `v11/llm/grok_filter.py` | ✅ Complete |
-| IBKR connection | `v11/execution/ibkr_connection.py` | ✅ Ported from v8 |
+| IBKR connection | `v11/execution/ibkr_connection.py` | ✅ Ported from v8 + auto-reconnect (5 min timeout, persistent failure detection) |
 | Bar aggregator | `v11/execution/bar_aggregator.py` | ✅ Ported from v8, 10 tests |
-| Trade manager (CENTER) | `v11/execution/trade_manager.py` | ✅ Complete |
+| Trade manager (CENTER) | `v11/execution/trade_manager.py` | ✅ Complete + emergency_close() + auto_close_orphans |
 | Live engine | `v11/live/live_engine.py` | ✅ Complete |
-| Entry point | `v11/live/run_live.py` | ✅ Live: Py3.14 fix, --no-llm flag, status display fix |
+| Entry point | `v11/live/run_live.py` | ✅ Live: Py3.14 fix, --no-llm flag, status display fix, emergency shutdown, price staleness, broker sync, 5 PM ET reset, stale emergency cleanup, velocity display |
 | Config | `v11/config/` | ✅ Complete |
 | Passthrough LLM | `v11/llm/passthrough_filter.py` | ✅ Mechanical auto-approve (--no-llm mode) |
-| Tests | `v11/tests/` | ✅ 263 tests, all passing |
+| Tests | `v11/tests/` | ✅ 374 tests, all passing |
 | Data loader | `v11/backtest/data_loader.py` | ✅ Complete |
 | Simulator | `v11/backtest/simulator.py` | ✅ Complete |
 | Metrics | `v11/backtest/metrics.py` | ✅ Complete |
@@ -245,7 +248,7 @@ The Darvas strategy has higher per-trade quality. The 4H level strategy has 10x 
 | LevelRetestEngine | `v11/live/level_retest_engine.py` | ✅ Complete, 8 tests |
 | MultiStrategyRunner | `v11/live/multi_strategy_runner.py` | ✅ Complete, 15 tests |
 | V6 ORB package | `v11/v6_orb/` | ✅ Frozen V6 copies (strategy, context, executor) |
-| ORB Adapter | `v11/live/orb_adapter.py` | ✅ Complete, 27 tests |
+| ORB Adapter | `v11/live/orb_adapter.py` | ✅ Complete, 27 tests + velocity/order/stale-breakout diagnostics |
 | HTF SMA investigation | `v11/backtest/investigate_htf_sma.py` | ✅ Complete |
 | ADX filter investigation | `v11/backtest/investigate_adx_filter.py` | ✅ Complete |
 | HTF Darvas investigation | `v11/backtest/investigate_htf_darvas.py` | ✅ Complete |
@@ -514,8 +517,16 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 | 13 | Historical replay simulator | ✅ Complete (multi-provider LLM, configurable model/base_url) |
 | 14 | LLM model comparison (5 models) | ✅ Complete — **DeepSeek V3 winner** (70% WR, 3.57 PF, Sharpe 8.84) |
 | 15 | LLM filtering enhancements | ✅ Complete — expanded history (20 daily + 4h bars), regime-filtered feedback loop, live auto-assessment |
-| 16 | Walk-forward validation | 🔲 Future |
-| 17 | Integration replay test | 🔲 Future |
+| 16 | IBKR auto-reconnect Phase B | ✅ Complete — retry limits, emergency close, price staleness, orphan handling, broker sync, 5 PM ET reset, auto-restart wrapper |
+| 17 | GatewayManager (IBC hybrid) | ✅ Complete — auto-login via IBC, health monitoring, restart orchestration, CLI (--check/--setup) |
+| 18 | Streamlit monitoring dashboard | ✅ Complete — KPIs, P&L chart, price chart, trade log, exit breakdown, strategy status, auto-refresh |
+| 19 | 4H Level detection fix | ✅ Complete — left/right bars 10→3, levels now detected |
+| 20 | ORB velocity + stale breakout diagnostics | ✅ Complete — velocity display, resting order info, stale breakout guard |
+| 21 | ORB strategy review + data integrity audit | ✅ Complete — all EURUSD strategies suspended (data modified 2026-04-13), ORB confirmed viable on clean XAUUSD data. See `docs/journal/2026-04-16_strategy_review_and_plan.md` |
+| 22 | ORB hardening — close live/backtest divergences | ✅ Complete (2026-04-16): live tick_count fix (IBKR real volume), skip_weekdays enforced, Darvas disabled, backtest extended |
+| 23 | Paper trade ORB (no LLM, gap=ON, skip Wed) | 🔲 Next — run 4–6 weeks, minimum 20 trades |
+| 24 | Walk-forward validation | 🔲 Future |
+| 25 | Integration replay test | 🔲 Future |
 
 ### Open Questions
 
@@ -532,6 +543,13 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 11. **LLM feedback loop Step 3** — Track rejection pattern distribution, show LLM its own biases
 12. **Live timeout** — DeepSeek V3 averages ~8s but can spike to 18s; 10s timeout may be too tight
 13. **Drawdown management** — calibrated prompt increased max drawdown from $51.80 to $97.00; may need tighter risk controls
+14. **IBC installation** — Manual step: install IBC, configure config.ini, create scheduled task (see `python -m v11.live.gateway_manager --setup`)
+15. **Phase B unit tests** — Mock-based tests for emergency shutdown, price staleness, orphan close, broker sync
+16. **Heartbeat file (Phase C)** — Write `v11/live/state/heartbeat.json` every 5 min for external monitoring/alerting
+17. ~~**ORB velocity threshold**~~ **RECONSIDERED (2026-04-16):** Backtest shows velocity=OFF, gap=ON gives OOS AvgR +0.183 vs velocity=ON +0.126. The velocity filter is hurting. Consider disabling it — simpler system with better OOS metrics.
+18. **LLM staleness re-check** — Currently LLM approves once per day; should it re-evaluate if breakout happens hours later? User wants to observe current behavior first.
+19. **EURUSD data integrity** — `eurusd_1m_tick.csv` modified 2026-04-13 without documentation. All EURUSD research (Darvas, 4H Level Retest) is invalidated. Must investigate before re-enabling EURUSD strategies.
+20. **Velocity filter decision** — Backtest (2026-04-16) confirms velocity=OFF outperforms. Decision pending: disable velocity filter before paper trading?
 
 ### Full Design
 

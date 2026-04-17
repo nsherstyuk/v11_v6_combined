@@ -1,8 +1,8 @@
 # V11 Design Document — Darvas Box + Volume Imbalance + LLM Filter
 
-**Last updated:** 2026-04-13 ET (LLM filtering enhancements: expanded history, regime-filtered feedback loop, live auto-assessment)
-**Status:** Phase 15 complete. LLM filtering with regime-filtered feedback loop. Expanded price history (20 daily + 4h bars + trend context). Auto-assessment wired for both replay and live. DeepSeek V3 via OpenRouter.
-**Related docs:** `docs/PROJECT_STATUS.md` | `docs/journal/2026-04-13_llm_filtering_enhancements.md` | `docs/journal/2026-04-13_llm_model_comparison.md`
+**Last updated:** 2026-04-14 ET (IBKR auto-reconnect Phase B + GatewayManager hybrid IBC integration)
+**Status:** Phase 17 complete. Auto-reconnect with emergency shutdown + GatewayManager (IBC hybrid). 24/5 unattended operation ready (IBC install pending).
+**Related docs:** `docs/PROJECT_STATUS.md` | `docs/journal/2026-04-14_auto_reconnect_session.md` | `docs/journal/2026-04-14_ibkr_auto_reconnect_plan.md`
 
 ---
 
@@ -473,12 +473,18 @@ C:\ibkr_grok-_wing_agent\v11\
 │   ├── prompt_templates.py      # Signal evaluation prompt
 │   └── models.py                # Pydantic: SignalContext, FilterDecision
 ├── execution/
-│   ├── ibkr_connection.py       # IBKR connection manager (from v8)
-│   ├── trade_manager.py         # Bracket orders, fills, cleanup (from v8)
+│   ├── ibkr_connection.py       # IBKR connection manager (from v8) + auto-reconnect (5 min timeout)
+│   ├── trade_manager.py         # Bracket orders, fills, cleanup (from v8) + emergency_close + orphan handling
 │   └── bar_aggregator.py        # Tick → bar aggregation (from v8)
 ├── live/
 │   ├── live_engine.py           # RollingBuffer + orchestration
-│   ├── run_live.py              # Main loop
+│   ├── run_live.py              # Main loop + emergency shutdown + price staleness + broker sync + 5 PM ET reset
+│   ├── gateway_manager.py       # Gateway lifecycle via IBC (auto-login, health monitoring, restart)
+│   ├── start_v11.bat            # Auto-restart wrapper with Gateway health checks
+│   ├── risk_manager.py          # Portfolio-level risk management
+│   ├── multi_strategy_runner.py # Multi-strategy orchestrator
+│   ├── orb_adapter.py           # V6 ORB adapter
+│   ├── level_retest_engine.py   # 4H level retest strategy
 │   └── watchdog.py              # Auto-restart (from v8)
 ├── backtest/
 │   ├── runner.py                # Replay historical bars through DarvasDetector
@@ -859,3 +865,115 @@ Year-by-year OOS (direct mode, 4 of 6 years positive):
 - ~~V6 ORB adapter~~ → **✅ COMPLETE** (Phase 5 done: copied into `v11/v6_orb/`, adapter in `v11/live/orb_adapter.py`, 27 tests)
 - **Daily bar context for LLM** (Critique #3) — SignalContext supports daily bars but no data source wired up. Priority: before live trading
 - **External economic calendar API** (Critique #2) — Grok's training knowledge is approximate. Priority: before live trading with real money
+
+---
+
+## 13. Auto-Reconnect & Unattended Operation (2026-04-14)
+
+### 13.1 Problem Statement
+
+V11's IBKR reconnection works for brief disconnects (proven: 55s reconnect at 00:25). But:
+- No safety net if IBKR stays down >5 min → V11 loops forever, positions unmanaged
+- No price feed staleness detection → strategies silently stop receiving ticks
+- Orphaned broker positions (broker has position, internal state doesn't) → position hangs open
+- Risk manager out of sync after reconnect → could block valid trades or allow over-allocation
+- Daily reset at UTC midnight, not 5 PM ET (FX session boundary) → PnL limits span two sessions
+- No auto-restart if V11 crashes → manual intervention required
+- No auto-login if Gateway needs re-authentication → manual login required
+
+### 13.2 Architecture — Three-Layer Defense
+
+```
+Layer 1: GatewayManager (process-level)
+├── Monitors Gateway health via socket check
+├── Starts Gateway via IBC (handles login dialog, 2FA, weekly re-auth)
+├── Rate-limited restarts (3/hour max)
+└── CLI: --check (one-shot), --setup (guide), no-args (persistent monitor)
+
+Layer 2: IBKRConnection (connection-level)
+├── Tracks disconnect duration (_first_disconnect_time)
+├── Declares PERSISTENT FAILURE after 5 min (MAX_RECONNECT_DURATION=300)
+├── Logs elapsed time on each reconnect attempt
+└── Clears timer on successful reconnect
+
+Layer 3: V11LiveTrader (application-level)
+├── Emergency shutdown after 5 min disconnect (MAX_DISCONNECT_SECONDS=300)
+│   ├── Cancel all open orders
+│   ├── Attempt final reconnect to close positions
+│   ├── Write emergency_shutdown.json state file
+│   └── sys.exit(1) → wrapper script restarts
+├── Price feed staleness detection (60s warn, 300s error + stream restart)
+├── Two-level position reconciliation on reconnect:
+│   ├── TradeManager: per-instrument internal vs broker
+│   └── RiskManager: portfolio-level tracking vs broker
+├── 5 PM ET broker session reset (Mon-Fri)
+└── Auto-restart wrapper (start_v11.bat)
+```
+
+### 13.3 Emergency Shutdown Flow
+
+```
+IBKR disconnect detected
+    │
+    ├── 0-5 min: normal reconnect attempts (existing behavior)
+    │
+    ├── 5 min: CRITICAL log "PERSISTENT IBKR FAILURE"
+    │   ├── Cancel all open orders
+    │   ├── Attempt one final reconnect
+    │   ├── If reconnect succeeds:
+    │   │   └── emergency_close() all open positions at market
+    │   ├── Write v11/live/state/emergency_shutdown.json
+    │   ├── Call _cleanup()
+    │   └── sys.exit(1)
+    │
+    └── Wrapper script (start_v11.bat):
+        ├── Detects exit code 1
+        ├── Checks Gateway health via gateway_manager --check
+        ├── If Gateway down: wait 60s, restart Gateway via IBC
+        └── Restart V11
+```
+
+### 13.4 GatewayManager + IBC Integration
+
+IBC (IB Controller) is the industry-standard tool for automating IBKR Gateway login. It handles:
+- Filling in the login dialog with username/password from `config.ini`
+- Accepting 2FA prompts on the IBKR mobile app
+- Daily auto-restart (Gateway built-in, configured at 05:00 AM ET)
+- Weekly re-authentication after Sunday credential expiry
+
+GatewayManager wraps IBC:
+- `start_gateway_via_ibc()` — launches `StartGateway.bat` with `/Gateway /Mode:paper /Inline`
+- `check_gateway_health()` — socket test on configured port (no ib_insync dependency)
+- `ensure_gateway_running()` — check + auto-start if down
+- `wait_for_gateway(timeout=120)` — wait for Gateway to respond
+
+**Setup requirements** (manual, one-time):
+1. Install IBC from https://github.com/IbcAlpha/IBC/releases → `C:\IBC`
+2. Configure `%USERPROFILE%\Documents\IBC\config.ini` with IBKR credentials
+3. Enable Gateway auto-restart at 05:00 AM ET
+4. Create Windows Scheduled Task for `StartGateway.bat` at system boot
+
+### 13.5 Key Parameters
+
+| Parameter | Value | Location |
+|---|---|---|
+| `MAX_RECONNECT_DURATION` | 300s (5 min) | `ibkr_connection.py` |
+| `MAX_DISCONNECT_SECONDS` | 300s (5 min) | `run_live.py` |
+| Price staleness warning | 60s | `run_live.py._check_price_staleness()` |
+| Price staleness error | 300s | `run_live.py._check_price_staleness()` |
+| `auto_close_orphans` | False (opt-in) | `live_config.py` |
+| Gateway restart rate limit | 3/hour | `gateway_manager.py` |
+| Gateway startup timeout | 120s | `gateway_manager.py` |
+| Broker session reset | 5 PM ET, Mon-Fri | `run_live.py` main loop |
+
+### 13.6 Files Added/Modified
+
+| File | Change |
+|---|---|
+| `v11/execution/ibkr_connection.py` | +25 lines: disconnect duration tracking, persistent failure detection |
+| `v11/execution/trade_manager.py` | +35 lines: `emergency_close()`, `auto_close_orphans` param |
+| `v11/live/run_live.py` | +120 lines: emergency shutdown, price staleness, broker sync, 5 PM ET reset |
+| `v11/live/multi_strategy_runner.py` | +1 line: pass `auto_close_orphans` from config |
+| `v11/config/live_config.py` | +3 lines: `auto_close_orphans` field |
+| `v11/live/gateway_manager.py` | **NEW** ~380 lines: Gateway lifecycle management via IBC |
+| `v11/live/start_v11.bat` | Updated: Gateway health checks integrated |

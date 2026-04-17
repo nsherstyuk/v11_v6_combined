@@ -228,3 +228,77 @@ Run `python v11/backtest/investigate_4h_levels_deep.py` with current data and tr
 - All backtest scripts use `sys.path.insert(0, r"C:\ibkr_grok-_wing_agent")` and can be run directly.
 - Tests: `pytest v11/tests/ -x -q` must pass before any commit to production code.
 - Data: `C:\nautilus0\data\1m_csv\` — XAUUSD data is clean (March 10), EURUSD data is suspect (April 13 modification).
+
+---
+
+## 10. Opus Review Findings and Hardening (2026-04-16)
+
+**Reviewer:** Claude Sonnet 4.6 (executing `docs/superpowers/plans/2026-04-16-orb-hardening.md`)
+
+### Additional Bugs Found
+
+**Bug 1 — Live tick_count is snapshot count, not market ticks (P0)**
+
+The priority 0 item in the plan described the velocity fix at the wrong layer. The fix in commit `1a9a9fb` overrode `get_velocity()` to use `bar.tick_count` from `_bar_buffer` — but bars in `_bar_buffer` come from `BarAggregator.on_price()` which counts snapshot ticks (~60/min constant). So `tick_count` in live bars was always ~60, not the real market activity. The velocity threshold of 168 was still unreachable.
+
+**Fix (commit `376c3c1`):** `on_bar()` now calls `_enrich_bar_tick_count()` which requests the just-completed bar from IBKR via `reqHistoricalDataAsync()` (MIDPOINT, 60-second duration). The real `volume` field from IBKR replaces the snapshot `tick_count`. Falls back gracefully if IBKR request fails.
+
+**Bug 2 — skip_weekdays not enforced in live (confirmed P0)**
+
+Described in this document (Section 2 / open questions). Confirmed: no code in `orb_adapter.py` or `v6_orb/` checked `skip_weekdays`. Wednesday trades were taken live but skipped in backtest.
+
+**Fix (commit `5631113`):** Added weekday check in `on_price()` after daily reset fires, before throttle/state machine processing. Daily reset still runs on skip days (cancels lingering orders from prior day).
+
+### Extended Backtest Results (2026-04-16)
+
+Script: `v11/backtest/investigate_orb_xauusd.py` — extended with velocity=OFF variants, slippage stress test, Wednesday=included, direction breakdown.
+
+**IS/OOS Summary:**
+
+| Config | IS_N | IS_WR | IS_AvgR | OOS_N | /yr | OOS_WR | OOS_AvgR |
+|---|---|---|---|---|---|---|---|
+| velocity=ON,  gap=OFF | 237 | 49.4% | +0.075 | 530 | 88.3 | 44.3% | +0.055 |
+| velocity=ON,  gap=ON  | 137 | 48.2% | +0.031 | 296 | 49.3 | 48.0% | **+0.126** |
+| velocity=OFF, gap=OFF | 212 | 47.6% | +0.077 | 583 | 97.2 | 43.9% | +0.091 |
+| velocity=OFF, gap=ON  | 121 | 48.8% | +0.088 | 315 | 52.5 | 49.5% | **+0.183** |
+| velocity=ON, gap=ON, Wed=include | 165 | 49.1% | +0.031 | 380 | 63.3 | 46.1% | +0.083 |
+
+**Key findings:**
+- **velocity=OFF outperforms velocity=ON**: +0.183 vs +0.126 OOS AvgR. The velocity filter is hurting. Likely filtering good low-activity setups that still break out cleanly.
+- **Wednesday skip confirmed**: Including Wednesday drops OOS AvgR from +0.126 to +0.083. Keep skipping.
+- **Direction breakdown** (gap=ON OOS): LONG +0.122, SHORT +0.130. No systematic long bias from fill-order check.
+
+**Slippage break-even (velocity=ON, gap=ON, OOS):**
+
+| Slippage/side | N | WR% | AvgR | PF |
+|---|---|---|---|---|
+| 0.0 pts | 296 | 48.0% | +0.126 | 1.33 |
+| 0.1 pts | 296 | 47.6% | +0.099 | 1.25 |
+| 0.2 pts | 296 | 46.3% | +0.072 | 1.17 |
+| 0.3 pts | 296 | 44.9% | +0.045 | 1.11 |
+| 0.5 pts | 296 | 43.2% | -0.009 | 0.98 |
+
+Edge survives 0.3pt/side slippage (+0.045 AvgR). Breaks even at ~0.5pt.
+
+### Decision Gate Outcomes
+
+1. **IBKR tick_count availability**: IBKR MIDPOINT historical bars for XAUUSD CMDTY include real tick activity in `volume`. Confirmed by existing `seed_historical` pattern using `int(vol)`.
+
+2. **Slippage kills edge at 0.2pt?**: NO. Edge still +0.072 at 0.2pt, +0.045 at 0.3pt. Proceed with confidence.
+
+3. **velocity=OFF outperforms?**: YES (+0.057 AvgR improvement OOS). Open decision: disable velocity filter before paper trading? Simpler system with better OOS metrics.
+
+4. **Wednesday=included better?**: NO. Skip-Wednesday confirmed correct.
+
+### System State After Hardening (2026-04-16)
+
+| Component | Status | Commit |
+|---|---|---|
+| ORB live tick_count fix | ✅ Deployed | `376c3c1` |
+| ORB skip_weekdays in live | ✅ Deployed | `5631113` |
+| ORB gap filter | ✅ Enabled | `12fb83f` |
+| Extended backtest | ✅ Complete | `6e374e9` |
+| Darvas disabled | ✅ Done | `68fa0c6` |
+| Test suite | ✅ 417 tests pass | — |
+
+**Next action:** Paper trade ORB (no LLM, gap=ON, skip Wed, velocity=ON for now). Monitor fills for 4–6 weeks. Consider disabling velocity filter based on extended backtest findings.
