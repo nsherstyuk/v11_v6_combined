@@ -34,20 +34,22 @@ def log():
 
 @pytest.fixture
 def live_cfg_both():
-    """LiveConfig with both EURUSD and XAUUSD."""
+    """LiveConfig with both EURUSD and XAUUSD, Darvas enabled for coverage."""
     return LiveConfig(
         instruments=[EURUSD_INSTRUMENT, XAUUSD_INSTRUMENT],
         dry_run=True,
         max_daily_loss=500.0,
+        darvas_enabled=True,
     )
 
 
 @pytest.fixture
 def live_cfg_eurusd_only():
-    """LiveConfig with only EURUSD."""
+    """LiveConfig with only EURUSD, Darvas enabled for coverage."""
     return LiveConfig(
         instruments=[EURUSD_INSTRUMENT],
         dry_run=True,
+        darvas_enabled=True,
     )
 
 
@@ -185,6 +187,22 @@ class TestWireStrategies:
 
         assert "EURUSD" in trader._active_pairs
         assert "XAUUSD" in trader._active_pairs
+
+    def test_darvas_disabled_by_default(self, log):
+        """darvas_enabled=False (default) means no EURUSD strategies are loaded."""
+        cfg = LiveConfig(
+            instruments=[EURUSD_INSTRUMENT, XAUUSD_INSTRUMENT],
+            dry_run=True,
+        )
+        assert cfg.darvas_enabled is False
+        trader = _make_trader(cfg, log)
+        trader._wire_strategies()
+
+        names = [e.strategy_name for e in trader.runner.engines]
+        assert "Darvas_Breakout" not in names
+        assert "4H_Level_Retest" not in names
+        assert "V6_ORB" in names
+        assert "EURUSD" not in trader._active_pairs
 
 
 # ── 4. Risk manager wired with correct limits ───────────────────────────────

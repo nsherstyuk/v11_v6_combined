@@ -111,6 +111,9 @@ class LiveConfig:
                                             # breakout_price by the time LLM responds,
                                             # abort the trade regardless of approval
 
+    # Strategy enablement
+    darvas_enabled: bool = False  # Disabled: no reproducible OOS edge (2026-04-16 audit)
+
     # Dry run mode
     dry_run: bool = True
 

@@ -236,7 +236,7 @@ class V11LiveTrader:
         """Add strategies to the runner based on configured instruments."""
         active_pairs = {i.pair_name for i in self.live_cfg.instruments}
 
-        if "EURUSD" in active_pairs:
+        if "EURUSD" in active_pairs and self.live_cfg.darvas_enabled:
             # Strategy A: Darvas Breakout + SMA(50)
             self.runner.add_darvas_strategy(
                 strategy_config=EURUSD_CONFIG,
