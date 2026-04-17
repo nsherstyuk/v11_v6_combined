@@ -56,6 +56,7 @@ def _mock_ib():
     ib.reqMktData.return_value = MagicMock()
     ib.pendingTickersEvent = MagicMock()
     ib.sleep = MagicMock()
+    ib.reqHistoricalDataAsync = AsyncMock(return_value=[])
     return ib
 
 
@@ -594,3 +595,103 @@ class TestBarVelocity:
 
         velocity = adapter._compute_bar_velocity(3, now)
         assert velocity > 168  # sum=630, /3 = 210 > threshold
+
+    def test_snapshot_ticks_below_threshold(self, adapter):
+        """Documents the bug: snapshot tick_count (~60) never exceeds 168 threshold."""
+        now = datetime(2025, 1, 15, 10, 3, 0, tzinfo=timezone.utc)
+        for i in range(3):
+            ts = datetime(2025, 1, 15, 10, i, 0, tzinfo=timezone.utc)
+            adapter._bar_buffer.append(self._make_bar(ts, 60))  # IBKR snapshot rate
+
+        velocity = adapter._compute_bar_velocity(3, now)
+        assert velocity < 168  # 60*3/3=60, well below threshold — velocity filter broken
+
+    def test_real_tick_count_above_threshold(self, adapter):
+        """Real market tick counts (mean ~144) can exceed the 168 threshold."""
+        now = datetime(2025, 1, 15, 10, 3, 0, tzinfo=timezone.utc)
+        for i in range(3):
+            ts = datetime(2025, 1, 15, 10, i, 0, tzinfo=timezone.utc)
+            adapter._bar_buffer.append(self._make_bar(ts, 200))  # real active market
+
+        velocity = adapter._compute_bar_velocity(3, now)
+        assert velocity > 168  # 200*3/3=200, above threshold — filter works
+
+
+# ── 12. Bar tick_count enrichment from IBKR ───────────────────────────────────
+
+class TestBarTickCountEnrichment:
+    """Tests for _enrich_bar_tick_count — replacing snapshot tick_count with
+    real IBKR market tick count via reqHistoricalDataAsync."""
+
+    def _make_bar(self, tick_count: int = 60):
+        from v11.core.types import Bar
+        return Bar(
+            timestamp=datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc),
+            open=2650.0, high=2651.0, low=2649.0, close=2650.5,
+            tick_count=tick_count,
+            buy_volume=30.0, sell_volume=30.0,
+        )
+
+    def _make_ibkr_bar(self, volume: int):
+        """Mock ib_insync BarData with a volume field."""
+        b = MagicMock()
+        b.volume = volume
+        return b
+
+    @pytest.mark.asyncio
+    async def test_enrichment_uses_ibkr_volume(self, adapter):
+        """When IBKR returns a bar with volume>0, tick_count is replaced."""
+        bar = self._make_bar(tick_count=60)
+        ibkr_bar = self._make_ibkr_bar(volume=215)
+        adapter._ib.reqHistoricalDataAsync = AsyncMock(return_value=[ibkr_bar])
+
+        result = await adapter._enrich_bar_tick_count(bar)
+
+        assert result.tick_count == 215
+        # Other fields preserved
+        assert result.open == bar.open
+        assert result.high == bar.high
+
+    @pytest.mark.asyncio
+    async def test_enrichment_falls_back_on_empty_response(self, adapter):
+        """When IBKR returns no bars, original bar is preserved."""
+        bar = self._make_bar(tick_count=60)
+        adapter._ib.reqHistoricalDataAsync = AsyncMock(return_value=[])
+
+        result = await adapter._enrich_bar_tick_count(bar)
+
+        assert result is bar
+        assert result.tick_count == 60
+
+    @pytest.mark.asyncio
+    async def test_enrichment_falls_back_on_zero_volume(self, adapter):
+        """When IBKR returns volume=0, original bar is preserved."""
+        bar = self._make_bar(tick_count=60)
+        ibkr_bar = self._make_ibkr_bar(volume=0)
+        adapter._ib.reqHistoricalDataAsync = AsyncMock(return_value=[ibkr_bar])
+
+        result = await adapter._enrich_bar_tick_count(bar)
+
+        assert result is bar
+
+    @pytest.mark.asyncio
+    async def test_enrichment_falls_back_on_exception(self, adapter):
+        """When IBKR request raises, original bar is preserved."""
+        bar = self._make_bar(tick_count=60)
+        adapter._ib.reqHistoricalDataAsync = AsyncMock(side_effect=Exception("timeout"))
+
+        result = await adapter._enrich_bar_tick_count(bar)
+
+        assert result is bar
+
+    @pytest.mark.asyncio
+    async def test_on_bar_uses_enriched_tick_count(self, adapter):
+        """on_bar uses enriched tick_count when IBKR provides real volume."""
+        bar = self._make_bar(tick_count=60)
+        ibkr_bar = self._make_ibkr_bar(volume=215)
+        adapter._ib.reqHistoricalDataAsync = AsyncMock(return_value=[ibkr_bar])
+
+        await adapter.on_bar(bar)
+
+        assert len(adapter._bar_buffer) == 1
+        assert adapter._bar_buffer[0].tick_count == 215

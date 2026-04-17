@@ -277,9 +277,10 @@ class ORBAdapter:
 
     async def on_bar(self, bar) -> None:
         """Store bar for velocity calculation; evaluate LLM gate when pending."""
-        # Always buffer the bar for bar-level velocity computation.
-        # This gives get_velocity() real tick activity data instead of
-        # the constant ~60/min IBKR snapshot rate.
+        # Replace BarAggregator's snapshot tick_count (~60/min constant) with
+        # real market tick count from IBKR historical data. This is required for
+        # the velocity filter threshold (168) to work as calibrated.
+        bar = await self._enrich_bar_tick_count(bar)
         self._bar_buffer.append(bar)
 
         if not self._llm_gate_pending:
@@ -689,6 +690,35 @@ class ORBAdapter:
         self._context.disconnect()
 
     # ── Bar-level velocity ────────────────────────────────────────
+
+    async def _enrich_bar_tick_count(self, bar):
+        """Replace BarAggregator snapshot tick_count with real IBKR tick count.
+
+        BarAggregator counts on_price() calls (~60/min regardless of activity).
+        IBKR MIDPOINT historical bars include real market tick activity in the
+        volume field, matching the distribution the velocity threshold was
+        calibrated on (mean ~144, variance 1-933).
+
+        Falls back to original bar if the IBKR request fails or returns no data.
+        """
+        from dataclasses import replace as dc_replace
+        try:
+            ibkr_bars = await self._ib.reqHistoricalDataAsync(
+                self._contract,
+                endDateTime='',
+                durationStr='60 S',
+                barSizeSetting='1 min',
+                whatToShow='MIDPOINT',
+                useRTH=False,
+                formatDate=2,
+            )
+            if ibkr_bars:
+                tc = int(getattr(ibkr_bars[-1], 'volume', 0))
+                if tc > 0:
+                    return dc_replace(bar, tick_count=tc)
+        except Exception as exc:
+            self._log.debug(f"ORB: tick_count enrichment failed: {exc}")
+        return bar
 
     def _compute_bar_velocity(self, lookback_minutes: int,
                               now: Optional[datetime] = None) -> float:
