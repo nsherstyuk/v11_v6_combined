@@ -39,6 +39,8 @@ docs/
     └── 2026-04-14_ibkr_auto_reconnect_plan.md ← IBKR auto-reconnect research + plan (Phase A-C)
     └── 2026-04-14_auto_reconnect_session.md ← Phase B implemented: retry limits, emergency close, staleness, orphans, broker sync, session reset, GatewayManager
     └── 2026-04-16_dashboard_and_orb_debug_session.md ← Streamlit dashboard, 4H level detection fix, ORB velocity/stale-breakout debugging
+    └── 2026-04-16_strategy_review_and_plan.md ← Full strategy audit: tick_count bug, Darvas/4H edge gone, ORB still viable
+    └── 2026-04-16_orb_hardening_execution.md ← Plan execution: tick_count fix, skip_weekdays, extended backtest, Darvas off, EURUSD subscription cleanup
     └── ...future sessions...
 ```
 
@@ -524,9 +526,10 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 | 20 | ORB velocity + stale breakout diagnostics | ✅ Complete — velocity display, resting order info, stale breakout guard |
 | 21 | ORB strategy review + data integrity audit | ✅ Complete — all EURUSD strategies suspended (data modified 2026-04-13), ORB confirmed viable on clean XAUUSD data. See `docs/journal/2026-04-16_strategy_review_and_plan.md` |
 | 22 | ORB hardening — close live/backtest divergences | ✅ Complete (2026-04-16): live tick_count fix (IBKR real volume), skip_weekdays enforced, Darvas disabled, backtest extended |
-| 23 | Paper trade ORB (no LLM, gap=ON, skip Wed) | 🔲 Next — run 4–6 weeks, minimum 20 trades |
-| 24 | Walk-forward validation | 🔲 Future |
-| 25 | Integration replay test | 🔲 Future |
+| 23 | EURUSD subscription cleanup | ✅ Complete (2026-04-16): removed EURUSD from default instruments + LiveConfig defaults, dynamic startup banner |
+| 24 | Paper trade ORB (no LLM, gap=ON, skip Wed) | 🔲 Next — run 4–6 weeks, minimum 20 trades. Command: `start_v11.bat --live --no-llm` |
+| 25 | Walk-forward validation | 🔲 Future |
+| 26 | Integration replay test | 🔲 Future |
 
 ### Open Questions
 
