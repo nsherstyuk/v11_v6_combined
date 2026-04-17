@@ -831,8 +831,8 @@ def main():
     parser.add_argument("--port", type=int, default=4002)
     parser.add_argument("--client-id", type=int, default=11)
     parser.add_argument("--instruments", nargs="+",
-                        default=["EURUSD", "XAUUSD"],
-                        help="Instruments to trade (default: EURUSD XAUUSD)")
+                        default=["XAUUSD"],
+                        help="Instruments to trade (default: XAUUSD)")
     parser.add_argument("--max-daily-loss", type=float, default=500.0,
                         help="Combined daily loss limit in USD")
     parser.add_argument("--no-llm", action="store_true",
@@ -868,7 +868,8 @@ def main():
     log.info("=" * 60)
     log.info("V11 — Multi-Strategy Portfolio")
     log.info(f"  Instruments: {[i.pair_name for i in instruments]}")
-    log.info(f"  Strategies:  Darvas+SMA, 4H Retest (EURUSD) + ORB (XAUUSD)")
+    active_strats = "ORB (XAUUSD)" if not live_cfg.darvas_enabled else "Darvas+SMA, 4H Retest (EURUSD) + ORB (XAUUSD)"
+    log.info(f"  Strategies:  {active_strats}")
     log.info(f"  Dry-run:     {dry_run}")
     use_llm = not args.no_llm
     log.info(f"  LLM:         {'grok (active)' if use_llm else 'DISABLED'}")

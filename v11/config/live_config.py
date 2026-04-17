@@ -79,11 +79,9 @@ class LiveConfig:
     ibkr_port: int = 4002           # 7497=TWS paper, 4002=gateway paper
     ibkr_client_id: int = 11        # different from v8 (10) and swing agent
 
-    # Instruments to trade (multi-instrument from day one)
+    # Instruments to trade
     instruments: List[InstrumentConfig] = field(default_factory=lambda: [
         XAUUSD_INSTRUMENT,
-        EURUSD_INSTRUMENT,
-        USDJPY_INSTRUMENT,
     ])
 
     # Rolling buffer
