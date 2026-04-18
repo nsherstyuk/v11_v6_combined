@@ -27,3 +27,24 @@ venv/
 
 # Grid search CSVs (large, reproducible from code)
 v11_grid_*.csv
+
+# Tick vault cache (downloaded .bi5 files, reproducible)
+tick_vault_data/
+
+# Live tick logs (large, generated at runtime)
+data/ticks/
+
+# Claude Code worktree/session state
+.claude/
+
+# V11 live runtime state (logs, trades, locks, state files)
+v11/live/logs/
+v11/live/state/
+v11/live/trades/
+v11/live/.gateway_manager.lock
+
+# Backtest result text files (reproducible from scripts)
+v11/backtest/*_results.txt
+v11/backtest/output_*.txt
+v11/backtest/research_output.txt
+v11/backtest/intraday_results.txt
