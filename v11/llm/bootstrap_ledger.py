@@ -547,7 +547,7 @@ def run_bootstrap(days: int, dry_run: bool = False, from_cache: bool = False,
                 r.get("grade", ""), " ")
             print(f"  {r['date']}: {r.get('decision','?')} "
                   f"(conf={r.get('confidence', '?')}) "
-                  f"→ {icon} {r.get('grade','?')} "
+                  f"-- {icon} {r.get('grade','?')} "
                   f"({r.get('pnl_r', 0):+.1f}R)")
 
     print(f"\nLedger stats: {ledger.stats}")

@@ -44,8 +44,8 @@ class StrategyConfig:
     # 4H Swing Level Detector (see V11_DESIGN.md §12)
     level_detector_enabled: bool = True # enable 4H swing level detection
     level_htf_bar_minutes: int = 240    # HTF bar period (240 = 4H)
-    level_left_bars: int = 10           # swing detection: bars required on left
-    level_right_bars: int = 10          # swing detection: bars required on right
+    level_left_bars: int = 3            # swing detection: bars required on left (3×4H=12h is sufficient)
+    level_right_bars: int = 3           # swing detection: bars required on right
     level_expiry_hours: int = 72        # levels expire after 72h (3 days)
     level_merge_distance: float = 0.00005  # merge levels within 0.5 pips (EURUSD)
 

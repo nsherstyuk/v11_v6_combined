@@ -20,8 +20,9 @@ REM Usage: start_v11.bat [--dry-run] [--live]
 echo [%date% %time%] Ensuring Gateway is running...
 python -m v11.live.gateway_manager --check
 if %errorlevel% NEQ 0 (
-    echo [%date% %time%] Gateway not running. Starting via IBC...
-    start "" /B python -m v11.live.gateway_manager
+    echo [%date% %time%] Gateway not running. Starting gateway_manager...
+    REM Start in its own minimized window — /B shares console signals and can kill V11
+    start "GatewayManager" /MIN python -m v11.live.gateway_manager
     echo [%date% %time%] Waiting 120s for Gateway to start and complete login/2FA...
     timeout /t 120
 )
@@ -49,4 +50,6 @@ if %errorlevel% NEQ 0 (
 goto loop
 
 :end
+REM Clean up gateway_manager lock file
+del /Q v11\live\.gateway_manager.lock 2>nul
 echo V11 wrapper stopped.

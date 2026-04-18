@@ -1,6 +1,6 @@
 # Project Status — All Trading Systems
 
-**Last updated:** 2026-04-16 ET (ORB hardening: tick_count fix, skip_weekdays, stress-test backtest, Darvas disabled)  
+**Last updated:** 2026-04-17 ET (Phase B safety fixes: daily bar refresh, LLM timeout split, heartbeat file, 35 new unit tests)  
 **Author:** Cascade + Claude Opus 4.6 + Claude Sonnet 4.6 (AI pair programmers)
 
 ---
@@ -41,6 +41,9 @@ docs/
     └── 2026-04-16_dashboard_and_orb_debug_session.md ← Streamlit dashboard, 4H level detection fix, ORB velocity/stale-breakout debugging
     └── 2026-04-16_strategy_review_and_plan.md ← Full strategy audit: tick_count bug, Darvas/4H edge gone, ORB still viable
     └── 2026-04-16_orb_hardening_execution.md ← Plan execution: tick_count fix, skip_weekdays, extended backtest, Darvas off, EURUSD subscription cleanup
+    └── 2026-04-17_trend_following_and_session_handoff.md ← V1: Trend following discovery (50d channel, Sharpe 5.24), underwater obstacles
+    └── 2026-04-17_trend_following_v2_reality_check.md ← V2: Next-day open entry, longs-only, walk-forward, regime filter, buy-and-hold comparison
+    └── 2026-04-17_phase_b_safety_fixes.md ← Phase B safety: daily bar refresh, LLM timeout split, heartbeat file, 35 unit tests
     └── ...future sessions...
 ```
 
@@ -233,10 +236,10 @@ The Darvas strategy has higher per-trade quality. The 4H level strategy has 10x 
 | Bar aggregator | `v11/execution/bar_aggregator.py` | ✅ Ported from v8, 10 tests |
 | Trade manager (CENTER) | `v11/execution/trade_manager.py` | ✅ Complete + emergency_close() + auto_close_orphans |
 | Live engine | `v11/live/live_engine.py` | ✅ Complete |
-| Entry point | `v11/live/run_live.py` | ✅ Live: Py3.14 fix, --no-llm flag, status display fix, emergency shutdown, price staleness, broker sync, 5 PM ET reset, stale emergency cleanup, velocity display |
+| Entry point | `v11/live/run_live.py` | ✅ Live: Py3.14 fix, --no-llm flag, status display fix, emergency shutdown, price staleness, broker sync, 5 PM ET reset, stale emergency cleanup, velocity display, daily bar refresh, heartbeat file |
 | Config | `v11/config/` | ✅ Complete |
 | Passthrough LLM | `v11/llm/passthrough_filter.py` | ✅ Mechanical auto-approve (--no-llm mode) |
-| Tests | `v11/tests/` | ✅ 374 tests, all passing |
+| Tests | `v11/tests/` | ✅ 452 tests, all passing |
 | Data loader | `v11/backtest/data_loader.py` | ✅ Complete |
 | Simulator | `v11/backtest/simulator.py` | ✅ Complete |
 | Metrics | `v11/backtest/metrics.py` | ✅ Complete |
@@ -528,31 +531,68 @@ At 1% risk per trade: ~13% annual return before compounding. Diversified across 
 | 22 | ORB hardening — close live/backtest divergences | ✅ Complete (2026-04-16): live tick_count fix (IBKR real volume), skip_weekdays enforced, Darvas disabled, backtest extended |
 | 23 | EURUSD subscription cleanup | ✅ Complete (2026-04-16): removed EURUSD from default instruments + LiveConfig defaults, dynamic startup banner |
 | 24 | Paper trade ORB (no LLM, gap=ON, skip Wed) | 🔲 Next — run 4–6 weeks, minimum 20 trades. Command: `start_v11.bat --live --no-llm` |
-| 25 | Walk-forward validation | 🔲 Future |
+| 25 | Walk-forward validation | ✅ Complete (2026-04-17) — Trend following WFE 128-373%, all configs survive OOS |
 | 26 | Integration replay test | 🔲 Future |
+| 27 | Trend following V2 backtest | ✅ Complete (2026-04-17) — next-day open, longs-only, regime filter, buy-and-hold comparison |
+| 28 | Trend following implementation decision | 🔲 Pending — see honest assessment below |
+| 29 | Daily bar refresh on date change | ✅ Complete (2026-04-17) — `_refresh_llm_context()` called at startup + UTC midnight |
+| 30 | LLM timeout split (ORB vs Darvas/4H) | ✅ Complete (2026-04-17) — ORB 15s + retry, Darvas/4H 20s |
+| 31 | Heartbeat file for external monitoring | ✅ Complete (2026-04-17) — `heartbeat.json` every 5 min |
+| 32 | Phase B unit tests | ✅ Complete (2026-04-17) — 35 tests in `test_phase_b_safety.py` |
 
 ### Open Questions
 
-1. **Walk-forward validation** — train on rolling windows instead of fixed IS/OOS split
+1. ~~**Walk-forward validation**~~ **RESOLVED (2026-04-17):** Trend following WFE 128-373% on XAUUSD. All configs survive OOS. But OOS period is also a gold bull market — validates trending-gold performance, not bear-market resilience.
 2. **Execution simulation** — model slippage, spread widening, partial fills
 3. ~~V6 ORB adapter — should we copy v6 code into v11, or import from nautilus0?~~ **RESOLVED: copied into v11/v6_orb/**
 4. ~~Combined risk management~~ **RESOLVED: RiskManager with unified daily loss limit across all strategies**
 5. **Integration replay test** — record tick stream → replay through MultiStrategyRunner → verify order flow
 6. ~~Grok LLM gate for ORB~~ **RESOLVED: sync OpenAI client, stop>=0 validator, on_bar() deferred eval**
-7. **Daily bar refresh** — ORB daily bars only loaded at startup; should refresh on daily reset
+7. ~~**Daily bar refresh**~~ **RESOLVED (2026-04-17):** `_refresh_llm_context()` now called on UTC midnight date change. Works for any ORB instrument (not just XAUUSD). Daily + 4h bars always fresh.
 8. ~~**Recent 1-min bars in ORBSignalContext**~~ **RESOLVED: Added 4-hour bars (5 days) + 20 daily bars + trend context**
 9. ~~**Prompt optimization**~~ **RESOLVED: Changed to "be calibrated" — 71% PnL improvement (10→27 trades, $132→$227)**
 10. ~~**LLM feedback loop Step 2**~~ **RESOLVED: Auto-assessment wired for both replay and live; regime-filtered feedback table injected per-call**
 11. **LLM feedback loop Step 3** — Track rejection pattern distribution, show LLM its own biases
-12. **Live timeout** — DeepSeek V3 averages ~8s but can spike to 18s; 10s timeout may be too tight
+12. ~~**Live timeout**~~ **RESOLVED (2026-04-17):** ORB timeout increased 10→15s (has retry + fallback). New `signal_llm_timeout_seconds=20s` for Darvas/4H (no fallback, needs more time). `GrokFilter` now routes timeouts separately.
 13. **Drawdown management** — calibrated prompt increased max drawdown from $51.80 to $97.00; may need tighter risk controls
-14. **IBC installation** — Manual step: install IBC, configure config.ini, create scheduled task (see `python -m v11.live.gateway_manager --setup`)
-15. **Phase B unit tests** — Mock-based tests for emergency shutdown, price staleness, orphan close, broker sync
-16. **Heartbeat file (Phase C)** — Write `v11/live/state/heartbeat.json` every 5 min for external monitoring/alerting
-17. ~~**ORB velocity threshold**~~ **RECONSIDERED (2026-04-16):** Backtest shows velocity=OFF, gap=ON gives OOS AvgR +0.183 vs velocity=ON +0.126. The velocity filter is hurting. Consider disabling it — simpler system with better OOS metrics.
+14. ~~**IBC installation**~~ **RESOLVED (2026-04-16):** IBC installed and configured; unattended 24/5 operation confirmed working by user.
+15. ~~**Phase B unit tests**~~ **RESOLVED (2026-04-17):** 35 tests in `test_phase_b_safety.py` covering: persistent failure, emergency close, reconcile (6 scenarios), price staleness (5 escalation levels), heartbeat, emergency shutdown (3), broker sync (2), config validation (5), GrokFilter timeout routing (3).
+16. ~~**Heartbeat file (Phase C)**~~ **RESOLVED (2026-04-17):** `_write_heartbeat()` writes `v11/live/state/heartbeat.json` every 5 min with {timestamp, connected, persistent_failure, instruments, pnl, trades, positions, strategies}. External monitoring: if file >10 min old → kill + restart.
+17. ~~**ORB velocity threshold**~~ **RESOLVED (2026-04-16 evening):** Velocity filter disabled in `XAUUSD_ORB_CONFIG` (`velocity_filter_enabled=False`). Per-bar `reqHistoricalDataAsync` enrichment also removed — it contended with `reqMktData` stream and caused XAUUSD tick starvation (IB 366 warnings, PRICE STALE) in live.
 18. **LLM staleness re-check** — Currently LLM approves once per day; should it re-evaluate if breakout happens hours later? User wants to observe current behavior first.
 19. **EURUSD data integrity** — `eurusd_1m_tick.csv` modified 2026-04-13 without documentation. All EURUSD research (Darvas, 4H Level Retest) is invalidated. Must investigate before re-enabling EURUSD strategies.
-20. **Velocity filter decision** — Backtest (2026-04-16) confirms velocity=OFF outperforms. Decision pending: disable velocity filter before paper trading?
+20. ~~**Velocity filter decision**~~ **RESOLVED (2026-04-16 evening):** Disabled — see #17.
+
+### Trend Following on XAUUSD — V2 Results (2026-04-17)
+
+**Config:** 50-day channel breakout, longs-only, next-day open entry, SMA200 regime filter
+**Data:** XAUUSD daily bars, 2018-01-01 to 2026-02-25
+**Journal:** `docs/journal/2026-04-17_trend_following_v2_reality_check.md`
+
+| Metric | Raw Backtest | Realistic (V2) | Buy & Hold Gold |
+|---|---|---|---|
+| Total P&L | +$4,531 | +$4,063 | +$7,887 |
+| Sharpe | +5.24 | +8.83 | n/a |
+| Max DD | -$429 (2%) | -$147 (1.0%) | -$1,619 (21.4%) |
+| Trades | 47 | 27 | n/a |
+| WR | 53% | 70% | n/a |
+| Time in market | ~40% | 36% | 100% |
+
+**Key V2 Findings:**
+1. Next-day open entry costs ~1%, NOT 30-50% as V1 estimated. XAUUSD gaps are negligible.
+2. Longs-only IMPROVES results (+26% P&L, +63% Sharpe) — but partly because gold tripled in sample.
+3. Walk-forward survives OOS (WFE 128-373%), but OOS period is also a gold bull market.
+4. Trend following captures only 52% of buy-and-hold return — the "edge" is mostly beta (being long gold).
+5. Real value-add is drawdown control: 9% of buy-and-hold's DD with 36% time at risk.
+6. SMA200 regime filter barely activates (gold above 200d SMA 77% of the time). Untestable in bear market.
+
+**Honest Assessment:**
+- This is a **risk management edge, not an alpha edge**. Better DD than buy-and-hold, but lower total return.
+- We have **ZERO bear market data** (data starts 2018). Longs-only would bleed in a gold crash.
+- Correlated with ORB (both long-biased directional on gold) — NOT diversification.
+- 27 trades over 8 years is a tiny sample.
+
+**Implementation Decision:** Pending. If gold structural uptrend thesis holds, it's worth adding as a second strategy alongside ORB for drawdown control. If seeking alpha uncorrelated with ORB, this is not it.
 
 ### Full Design
 
