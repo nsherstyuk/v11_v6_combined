@@ -34,6 +34,7 @@ DATA_DIR = Path(r"C:\nautilus0\data\1m_csv")
 
 INSTRUMENT_FILE_MAP = {
     "XAUUSD": "xauusd_1m_tick.csv",
+    "XAGUSD": "xagusd_1m_tick.csv",
     "EURUSD": "eurusd_1m_tick.csv",
     "USDJPY": "usdjpy_1m_tick.csv",
     "GBPUSD": "gbpusd_1m_tick.csv",

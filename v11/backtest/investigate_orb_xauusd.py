@@ -1,16 +1,21 @@
 """
-ORB XAUUSD — IS/OOS Backtest.
+ORB IS/OOS Backtest — parameterized by instrument.
 
-Loads clean XAUUSD 1-min data, runs V6 ORBStrategy via ReplayORBAdapter with:
+Loads clean 1-min data, runs V6 ORBStrategy via ReplayORBAdapter with:
   - velocity computed from tick_count (matching live, not bar-count proxy)
   - real gap filter from pre-computed rolling percentiles (no lookahead)
   - no LLM filter
 
 Produces IS (2024+) / OOS (2018-2023) metrics + year-by-year breakdown.
+
+Usage:
+    python -m v11.backtest.investigate_orb_xauusd              # default XAUUSD
+    python -m v11.backtest.investigate_orb_xauusd --symbol XAGUSD
 """
 import sys
 sys.path.insert(0, r"C:\ibkr_grok-_wing_agent")
 
+import argparse
 import asyncio
 import logging
 import math
@@ -35,35 +40,58 @@ IS_END    = datetime(2029, 12, 31, 23, 59, 59)
 OOS_YEARS = 6   # 2018-2023 inclusive
 
 
-# ── V6 config for XAUUSD ────────────────────────────────────────────────────
+# ── Instrument configs ──────────────────────────────────────────────────────
+# Scale-appropriate range filters: gold ~$2500 avg, silver ~$22 avg. Absolute
+# sizes are ~115x different; relative % ranges are similar. Keep pct filters
+# identical across instruments; scale absolute filters by price ratio.
 
-BASE_CFG = V6StrategyConfig(
-    instrument="XAUUSD",
-    range_start_hour=0,
-    range_end_hour=6,
-    trade_start_hour=8,
-    trade_end_hour=16,
-    skip_weekdays=(2,),           # skip Wednesday (0=Mon … 6=Sun)
-    velocity_filter_enabled=True,
-    velocity_lookback_minutes=3,
-    velocity_threshold=168.0,     # ticks/min threshold (live value)
-    rr_ratio=2.5,
-    min_range_size=1.0,
-    max_range_size=50.0,
-    min_range_pct=0.05,
-    max_range_pct=2.0,
-    be_hours=999,
-    max_pending_hours=4,
-    time_exit_minutes=0,
-    gap_filter_enabled=False,     # toggled per run
-    gap_vol_percentile=50.0,
-    gap_range_filter_enabled=False,
-    gap_range_percentile=40.0,
-    gap_rolling_days=60,
-    gap_start_hour=6,
-    gap_end_hour=8,
-    price_decimals=2,
-)
+_INSTRUMENT_CONFIGS: Dict[str, V6StrategyConfig] = {
+    "XAUUSD": V6StrategyConfig(
+        instrument="XAUUSD",
+        range_start_hour=0, range_end_hour=6,
+        trade_start_hour=8, trade_end_hour=16,
+        skip_weekdays=(2,),           # skip Wednesday
+        velocity_filter_enabled=True,
+        velocity_lookback_minutes=3,
+        velocity_threshold=168.0,
+        rr_ratio=2.5,
+        min_range_size=1.0, max_range_size=50.0,
+        min_range_pct=0.05, max_range_pct=2.0,
+        be_hours=999, max_pending_hours=4, time_exit_minutes=0,
+        gap_filter_enabled=False,
+        gap_vol_percentile=50.0,
+        gap_range_filter_enabled=False,
+        gap_range_percentile=40.0,
+        gap_rolling_days=60,
+        gap_start_hour=6, gap_end_hour=8,
+        price_decimals=2,
+    ),
+    "XAGUSD": V6StrategyConfig(
+        instrument="XAGUSD",
+        range_start_hour=0, range_end_hour=6,
+        trade_start_hour=8, trade_end_hour=16,
+        skip_weekdays=(2,),           # keep Wednesday skip (XAUUSD finding)
+        velocity_filter_enabled=True,
+        velocity_lookback_minutes=3,
+        velocity_threshold=168.0,
+        rr_ratio=2.5,
+        # Silver scale: absolute range filters reduced by ~100x to match
+        # XAUUSD's 0.04%-2.0% band. Silver ~$22, so 1.0 gold = 0.01 silver.
+        min_range_size=0.01, max_range_size=0.50,
+        min_range_pct=0.05, max_range_pct=2.0,
+        be_hours=999, max_pending_hours=4, time_exit_minutes=0,
+        gap_filter_enabled=False,
+        gap_vol_percentile=50.0,
+        gap_range_filter_enabled=False,
+        gap_range_percentile=40.0,
+        gap_rolling_days=60,
+        gap_start_hour=6, gap_end_hour=8,
+        price_decimals=3,              # silver quoted to 3 decimals
+    ),
+}
+
+# Default; overridden by CLI --symbol flag in main()
+BASE_CFG: V6StrategyConfig = _INSTRUMENT_CONFIGS["XAUUSD"]
 
 
 # ── Gap filter pre-computation ───────────────────────────────────────────────
@@ -282,13 +310,24 @@ async def _run_config(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global BASE_CFG
+
+    parser = argparse.ArgumentParser(description="ORB IS/OOS backtest")
+    parser.add_argument("--symbol", default="XAUUSD",
+                        choices=sorted(_INSTRUMENT_CONFIGS.keys()),
+                        help="Instrument symbol (default: XAUUSD)")
+    args = parser.parse_args()
+
+    symbol = args.symbol
+    BASE_CFG = _INSTRUMENT_CONFIGS[symbol]
+
     # Silence chatty replay logs
     logging.basicConfig(level=logging.WARNING)
     log = logging.getLogger("orb_bt")
     log.setLevel(logging.WARNING)
 
-    print("Loading XAUUSD bars…", flush=True)
-    all_bars = load_instrument_bars("XAUUSD")
+    print(f"Loading {symbol} bars…", flush=True)
+    all_bars = load_instrument_bars(symbol)
     print(f"  Loaded {len(all_bars):,} bars "
           f"({all_bars[0].timestamp.date()} – {all_bars[-1].timestamp.date()})")
 
