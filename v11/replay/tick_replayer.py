@@ -196,41 +196,42 @@ class TickReplayer:
         )
         self._trade_managers[pair] = tm
 
-        darvas = InstrumentEngine(
-            strategy_config=strategy_cfg,
-            inst_config=inst_cfg,
-            llm_filter=self._llm_filter,
-            trade_manager=tm,
-            live_config=self._live_config,
-            log=log,
-        )
-        darvas.strategy_name = "Darvas_Breakout"
-        darvas._risk_check = self._risk_manager.can_trade
+        engines: list = []
 
-        retest = LevelRetestEngine(
-            strategy_config=strategy_cfg,
-            inst_config=inst_cfg,
-            llm_filter=self._llm_filter,
-            trade_manager=tm,
-            live_config=self._live_config,
-            log=log,
-        )
-        retest._risk_check = self._risk_manager.can_trade
-
-        engines: list = [darvas, retest]
-
-        # ORB for XAUUSD
-        if pair == "XAUUSD":
-            from ..v6_orb.config import StrategyConfig as V6StrategyConfig
-            from .replay_orb import ReplayORBAdapter
-            v6_cfg = V6StrategyConfig(
-                instrument="XAUUSD",
-                velocity_filter_enabled=False,
-                max_pending_hours=8,
-                trade_end_hour=20,
+        # Darvas + 4H Level Retest — respect live_config.darvas_enabled flag
+        # (disabled by default; matches run_live.py behavior)
+        if self._live_config.darvas_enabled:
+            darvas = InstrumentEngine(
+                strategy_config=strategy_cfg,
+                inst_config=inst_cfg,
+                llm_filter=self._llm_filter,
+                trade_manager=tm,
+                live_config=self._live_config,
+                log=log,
             )
+            darvas.strategy_name = "Darvas_Breakout"
+            darvas._risk_check = self._risk_manager.can_trade
+            engines.append(darvas)
+
+            retest = LevelRetestEngine(
+                strategy_config=strategy_cfg,
+                inst_config=inst_cfg,
+                llm_filter=self._llm_filter,
+                trade_manager=tm,
+                live_config=self._live_config,
+                log=log,
+            )
+            retest._risk_check = self._risk_manager.can_trade
+            engines.append(retest)
+
+        # ORB for XAUUSD — use the SAME config as live (XAUUSD_ORB_CONFIG
+        # from run_live.py) so replay validates the production pipeline
+        # instead of an ad-hoc config.
+        if pair == "XAUUSD":
+            from .replay_orb import ReplayORBAdapter
+            from ..live.run_live import XAUUSD_ORB_CONFIG
             orb = ReplayORBAdapter(
-                v6_config=v6_cfg,
+                v6_config=XAUUSD_ORB_CONFIG,
                 llm_filter=self._llm_filter,
                 llm_confidence_threshold=self._config.llm_confidence_threshold,
                 live_config=self._live_config,
@@ -281,8 +282,8 @@ class TickReplayer:
         return stats
 
     def _print_summary(self, stats: dict) -> None:
-        print(f"\n── Tick Replay {self._config.start_date} → "
-              f"{self._config.end_date} ({', '.join(self._instruments)}) ──")
+        print(f"\n-- Tick Replay {self._config.start_date} -> "
+              f"{self._config.end_date} ({', '.join(self._instruments)}) --")
         total_pnl = 0.0
         for pair, s in stats.items():
             tm = self._trade_managers.get(pair)
@@ -292,4 +293,4 @@ class TickReplayer:
             print(f"  {pair:8s}  bars={s['bars']}  trades={trades}"
                   f"  PnL=${pnl:+.2f}")
         print(f"  Total PnL (dry run): ${total_pnl:+.2f}")
-        print("─" * 60)
+        print("-" * 60)
