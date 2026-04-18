@@ -105,7 +105,10 @@ class TestORBConfig:
         assert XAUUSD_ORB_CONFIG.rr_ratio == 2.5
 
     def test_velocity_settings(self):
-        assert XAUUSD_ORB_CONFIG.velocity_filter_enabled is True
+        # Velocity filter disabled 2026-04-16 — extended backtest showed
+        # velocity=OFF beats velocity=ON OOS (+0.057 AvgR). Per-bar IBKR
+        # tick_count enrichment was also removed (starved live market data).
+        assert XAUUSD_ORB_CONFIG.velocity_filter_enabled is False
         assert XAUUSD_ORB_CONFIG.velocity_lookback_minutes == 3
         assert XAUUSD_ORB_CONFIG.velocity_threshold == 168.0
 

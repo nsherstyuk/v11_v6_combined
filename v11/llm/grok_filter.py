@@ -45,6 +45,7 @@ class GrokFilter:
         model: str = "grok-4-1-fast-reasoning",
         base_url: str = "https://api.x.ai/v1",
         timeout: float = 30.0,
+        signal_timeout: Optional[float] = None,
         log_dir: Optional[str] = None,
     ):
         self._client = OpenAI(
@@ -53,6 +54,7 @@ class GrokFilter:
         )
         self._model = model
         self._timeout = timeout
+        self._signal_timeout = signal_timeout or timeout  # Darvas/4H uses longer timeout
         self._log_dir = Path(log_dir) if log_dir else None
         if self._log_dir:
             self._log_dir.mkdir(parents=True, exist_ok=True)
@@ -192,7 +194,7 @@ class GrokFilter:
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.1,
-                timeout=self._timeout,
+                timeout=self._signal_timeout,
             )
             raw_response = response.choices[0].message.content
             latency = time.monotonic() - start_time

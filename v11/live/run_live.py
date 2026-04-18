@@ -135,9 +135,9 @@ XAUUSD_ORB_CONFIG = V6StrategyConfig(
     rr_ratio=2.5,
     min_range_size=1.0,
     max_range_size=15.0,
-    velocity_filter_enabled=True,
+    velocity_filter_enabled=False,  # Extended backtest 2026-04-16: velocity=OFF beats ON OOS (+0.057 AvgR)
     velocity_lookback_minutes=3,
-    velocity_threshold=168.0,    # P50 from research
+    velocity_threshold=168.0,    # Retained for reference; filter is disabled
     gap_filter_enabled=True,     # V6-validated: +4.2pp WR, skip low-volatility pre-market days
     qty=1,
     point_value=1.0,
@@ -194,6 +194,7 @@ class V11LiveTrader:
                 model=live_cfg.llm_model,
                 base_url=live_cfg.llm_base_url,
                 timeout=live_cfg.llm_timeout_seconds,
+                signal_timeout=live_cfg.signal_llm_timeout_seconds,
                 log_dir=str(grok_log_dir),
             )
             log.info("LLM filter: Grok (active)")
@@ -285,56 +286,63 @@ class V11LiveTrader:
                 ))
             self.runner.seed_historical(pair, bars)
 
-        # Fetch daily bars for ORB LLM context
-        for pair in self.runner.get_feed_pairs():
-            if pair == "XAUUSD":
-                self.log.info(f"Fetching daily bars for {pair} (ORB context)...")
-                df = self.conn.fetch_historical_bars(
-                    pair, duration="20 D", bar_size="1 day")
-                if not df.empty:
-                    from v11.llm.models import DailyBarData
-                    daily_bars = []
-                    for _, row in df.iterrows():
-                        daily_bars.append(DailyBarData(
-                            date=str(row['date'])[:10],
-                            o=row['open'], h=row['high'],
-                            l=row['low'], c=row['close'],
-                        ))
-                    for engine in self.runner.engines:
-                        if hasattr(engine, '_daily_bars') and engine.pair_name == pair:
-                            engine._daily_bars = daily_bars
-                            self.log.info(
-                                f"{pair}: Loaded {len(daily_bars)} daily bars for ORB LLM")
+        # Fetch daily + 4h bars for ORB LLM context
+        self._refresh_llm_context()
 
-                # Fetch 4-hour bars for last 5 days
-                self.log.info(f"Fetching 4-hour bars for {pair} (ORB context)...")
-                df_4h = self.conn.fetch_historical_bars(
-                    pair, duration="5 D", bar_size="4 hours")
-                if not df_4h.empty:
-                    from v11.llm.models import HourlyBarData
-                    hourly_bars = []
-                    for _, row in df_4h.iterrows():
-                        date_str = str(row['date'])
-                        # Extract hour from datetime string (e.g. "2026-04-07 08:00:00")
-                        hour = 0
-                        if ' ' in date_str:
-                            try:
-                                hour = int(date_str.split(' ')[1].split(':')[0])
-                            except (ValueError, IndexError):
-                                pass
-                        # Session format: "00-04", "04-08", etc.
-                        session = f"{(hour // 4) * 4:02d}-{((hour // 4) + 1) * 4:02d}"
-                        hourly_bars.append(HourlyBarData(
-                            date=date_str[:10],
-                            o=row['open'], h=row['high'],
-                            l=row['low'], c=row['close'],
-                            session=session,
-                        ))
-                    for engine in self.runner.engines:
-                        if hasattr(engine, '_hourly_bars') and engine.pair_name == pair:
-                            engine._hourly_bars = hourly_bars
-                            self.log.info(
-                                f"{pair}: Loaded {len(hourly_bars)} 4-hour bars for ORB LLM")
+    def _refresh_llm_context(self) -> None:
+        """Refresh daily and 4-hour bars for ORB LLM context.
+
+        Called at startup and on each date change (UTC midnight) so the
+        LLM always has up-to-date trend / regime information.
+        Works for any instrument that has an ORB engine with _daily_bars.
+        """
+        for engine in self.runner.engines:
+            if not hasattr(engine, '_daily_bars'):
+                continue
+            pair = engine.pair_name
+
+            # Daily bars (20 days)
+            self.log.info(f"Refreshing daily bars for {pair} (ORB context)...")
+            df = self.conn.fetch_historical_bars(
+                pair, duration="20 D", bar_size="1 day")
+            if not df.empty:
+                from v11.llm.models import DailyBarData
+                daily_bars = []
+                for _, row in df.iterrows():
+                    daily_bars.append(DailyBarData(
+                        date=str(row['date'])[:10],
+                        o=row['open'], h=row['high'],
+                        l=row['low'], c=row['close'],
+                    ))
+                engine._daily_bars = daily_bars
+                self.log.info(
+                    f"{pair}: Refreshed {len(daily_bars)} daily bars for ORB LLM")
+
+            # 4-hour bars (5 days)
+            self.log.info(f"Refreshing 4-hour bars for {pair} (ORB context)...")
+            df_4h = self.conn.fetch_historical_bars(
+                pair, duration="5 D", bar_size="4 hours")
+            if not df_4h.empty:
+                from v11.llm.models import HourlyBarData
+                hourly_bars = []
+                for _, row in df_4h.iterrows():
+                    date_str = str(row['date'])
+                    hour = 0
+                    if ' ' in date_str:
+                        try:
+                            hour = int(date_str.split(' ')[1].split(':')[0])
+                        except (ValueError, IndexError):
+                            pass
+                    session = f"{(hour // 4) * 4:02d}-{((hour // 4) + 1) * 4:02d}"
+                    hourly_bars.append(HourlyBarData(
+                        date=date_str[:10],
+                        o=row['open'], h=row['high'],
+                        l=row['low'], c=row['close'],
+                        session=session,
+                    ))
+                engine._hourly_bars = hourly_bars
+                self.log.info(
+                    f"{pair}: Refreshed {len(hourly_bars)} 4-hour bars for ORB LLM")
 
     def run(self) -> None:
         """Main trading loop."""
@@ -418,6 +426,7 @@ class V11LiveTrader:
                         f"resetting daily counters")
                     self.runner.reset_daily()
                     self._session_reset_done = False  # allow 5 PM ET reset for new day
+                    self._refresh_llm_context()  # refresh daily/4h bars for new day
                 self._current_trading_date = today_str
 
                 # Broker session reset at 5 PM ET (FX market close)
@@ -464,6 +473,7 @@ class V11LiveTrader:
                 if time.time() - last_status_log > 300:
                     self._check_price_staleness()
                     self._log_status()
+                    self._write_heartbeat()
                     last_status_log = time.time()
 
                 self.conn.sleep(poll_interval)
@@ -689,6 +699,40 @@ class V11LiveTrader:
             elif stale_s > 60:
                 self.log.warning(
                     f"PRICE STALE: {pair} — no price for {stale_s:.0f}s")
+
+    def _write_heartbeat(self) -> None:
+        """Write heartbeat.json for external monitoring.
+
+        External scripts can check if this file is older than 10 minutes
+        to detect a hung/frozen process and kill + restart it.
+        """
+        state_dir = ROOT / "v11" / "live" / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        heartbeat_file = state_dir / "heartbeat.json"
+        try:
+            status = self.runner.get_all_status()
+            risk = status['risk']
+            state = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "connected": self.conn.connected,
+                "persistent_failure": self.conn.persistent_failure,
+                "instruments": self._active_pairs,
+                "pnl": risk['combined_pnl'],
+                "trades": risk['combined_trades'],
+                "positions": len(risk['open_positions']),
+                "strategies": [
+                    {
+                        "name": s.get('strategy_name', '?'),
+                        "pair": s.get('pair_name', '?'),
+                        "in_trade": s.get('in_trade', False),
+                        "bars": s.get('bar_count', 0),
+                    }
+                    for s in status['strategies']
+                ],
+            }
+            heartbeat_file.write_text(json.dumps(state, indent=2, default=str))
+        except Exception as e:
+            self.log.debug(f"Heartbeat write failed: {e}")
 
     def _reconcile_positions(self) -> None:
         """Reconcile internal trade state with broker after reconnect.

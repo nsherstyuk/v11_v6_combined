@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections import deque
 from datetime import datetime
 from typing import Optional, List
@@ -120,6 +121,7 @@ class LevelRetestEngine:
 
         # Last known price (for slippage ceiling check)
         self._last_price: float = 0.0
+        self._last_price_ts: float = 0.0  # epoch seconds (Fix 7)
 
         # Risk manager callback (set by MultiStrategyRunner)
         self._risk_check: Optional[object] = None
@@ -143,6 +145,7 @@ class LevelRetestEngine:
     def on_price(self, price: float, now: datetime) -> None:
         """Track latest price for slippage ceiling check."""
         self._last_price = price
+        self._last_price_ts = time.time()  # Fix 7
 
     async def on_bar(self, bar: Bar) -> None:
         """Process a completed 1-min bar through the level retest pipeline.
@@ -251,6 +254,14 @@ class LevelRetestEngine:
                     f"{self.pair_name}[{STRATEGY_NAME}]: RISK REJECTED — {reason}")
                 return
 
+        # Guard: check BEFORE LLM call to avoid spending latency on a taken slot
+        # (Fix 4: secondary check after drift remains as race-condition guard)
+        if self._trade_manager.in_trade:
+            self._log.info(
+                f"{self.pair_name}[{STRATEGY_NAME}]: "
+                f"TradeManager already in trade, skipping signal")
+            return
+
         # Build LLM context
         context = self._build_signal_context(signal, volume, bar)
 
@@ -274,16 +285,31 @@ class LevelRetestEngine:
                 f"{self._live_config.llm_confidence_threshold}")
             return
 
-        # Slippage ceiling check
+        # Slippage ceiling check (Fix 7: skip if price data is stale)
         if self._atr > 0 and self._last_price > 0:
-            drift = abs(self._last_price - signal.breakout_price)
-            max_drift = self._live_config.max_entry_drift_atr * self._atr
-            if drift > max_drift:
+            price_age_s = (time.time() - self._last_price_ts
+                           if self._last_price_ts > 0 else 0)
+            if price_age_s > 30:
                 self._log.warning(
-                    f"{self.pair_name}[{STRATEGY_NAME}]: ENTRY DRIFT ABORT — "
-                    f"drift={drift:.4f} ({drift/self._atr:.2f} ATR) "
-                    f"max={max_drift:.4f}")
-                return
+                    f"{self.pair_name}[{STRATEGY_NAME}]: DRIFT CHECK SKIPPED — "
+                    f"last price is {price_age_s:.0f}s stale")
+            else:
+                drift = abs(self._last_price - signal.breakout_price)
+                max_drift = self._live_config.max_entry_drift_atr * self._atr
+                if drift > max_drift:
+                    self._log.warning(
+                        f"{self.pair_name}[{STRATEGY_NAME}]: ENTRY DRIFT ABORT — "
+                        f"drift={drift:.4f} ({drift/self._atr:.2f} ATR) "
+                        f"max={max_drift:.4f}")
+                    return
+
+        # Secondary in_trade guard (race condition: Darvas may have entered
+        # during LLM latency)
+        if self._trade_manager.in_trade:
+            self._log.info(
+                f"{self.pair_name}[{STRATEGY_NAME}]: "
+                f"TradeManager already in trade, skipping signal")
+            return
 
         # Compute SL/TP from retest signal (V11_DESIGN.md §12)
         sl_offset = self.strategy_config.retest_sl_atr_offset * signal.atr

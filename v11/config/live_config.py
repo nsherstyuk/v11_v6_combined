@@ -93,7 +93,8 @@ class LiveConfig:
     llm_base_url: str = "https://openrouter.ai/api/v1"  # OpenAI-compatible endpoint (xAI, OpenRouter, etc.)
     llm_confidence_threshold: int = 75      # default confidence threshold (Darvas/Retest)
     orb_confidence_threshold: int = 55       # ORB threshold — lower because mechanical edge exists
-    llm_timeout_seconds: float = 10.0       # max wait for LLM response
+    llm_timeout_seconds: float = 15.0       # max wait for ORB LLM response (has retry + fallback)
+    signal_llm_timeout_seconds: float = 20.0  # max wait for Darvas/4H LLM (no fallback — needs more time)
     llm_bars_context: int = 200             # 1-min bars to send to LLM
     llm_daily_bars_context: int = 30        # daily bars to send to LLM
 
@@ -135,4 +136,5 @@ class LiveConfig:
         assert self.max_daily_loss > 0
         assert 0 <= self.llm_confidence_threshold <= 100
         assert self.llm_timeout_seconds > 0
+        assert self.signal_llm_timeout_seconds > 0
         assert len(self.instruments) >= 1, "At least one instrument required"

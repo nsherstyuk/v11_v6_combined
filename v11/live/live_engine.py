@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from datetime import datetime
 from typing import Optional, List
@@ -109,6 +110,7 @@ class InstrumentEngine:
 
         # Last known price (for slippage ceiling check after LLM latency)
         self._last_price: float = 0.0
+        self._last_price_ts: float = 0.0  # epoch seconds (Fix 7)
 
         # Strategy identifier (set by MultiStrategyRunner)
         self.strategy_name: str = "Darvas_Breakout"
@@ -131,6 +133,7 @@ class InstrumentEngine:
     def on_price(self, price: float, now: datetime) -> Optional[Bar]:
         """Process a price tick. Returns completed Bar if minute boundary crossed."""
         self._last_price = price
+        self._last_price_ts = time.time()  # Fix 7
         return self._aggregator.on_price(price, now)
 
     async def on_bar(self, bar: Bar) -> None:
@@ -246,6 +249,14 @@ class InstrumentEngine:
                 f"(buy_ratio={volume.buy_ratio_at_breakout:.3f})")
             return
 
+        # Guard: check BEFORE LLM call to avoid spending latency on a taken slot
+        # (Fix 4: secondary check after drift remains as race-condition guard)
+        if self._trade_manager.in_trade:
+            self._log.info(
+                f"{self.pair_name}[{self.strategy_name}]: "
+                f"TradeManager already in trade, skipping signal")
+            return
+
         # Build LLM context
         context = self._build_signal_context(signal, volume, bar)
 
@@ -269,24 +280,30 @@ class InstrumentEngine:
                 f"< threshold {self._live_config.llm_confidence_threshold}")
             return
 
-        # ── Slippage ceiling check (Critique #1: latency gap) ──────────
-        # Between calling Grok and getting a response, price may have moved.
-        # If it drifted too far from the breakout price, abort the trade.
+        # ── Slippage ceiling check (Fix 7: skip if price data is stale) ────
         atr = self._detector.current_atr
         if atr > 0 and self._last_price > 0:
-            drift = abs(self._last_price - signal.breakout_price)
-            max_drift = self._live_config.max_entry_drift_atr * atr
-            if drift > max_drift:
+            price_age_s = (time.time() - self._last_price_ts
+                           if self._last_price_ts > 0 else 0)
+            if price_age_s > 30:
                 self._log.warning(
-                    f"{self.pair_name}: ENTRY DRIFT ABORT — "
-                    f"price moved {drift:.4f} ({drift/atr:.2f} ATR) "
-                    f"during LLM latency. Max allowed: {max_drift:.4f} "
-                    f"({self._live_config.max_entry_drift_atr} ATR). "
-                    f"Breakout={signal.breakout_price}, "
-                    f"current={self._last_price}")
-                return
+                    f"{self.pair_name}: DRIFT CHECK SKIPPED — "
+                    f"last price is {price_age_s:.0f}s stale")
+            else:
+                drift = abs(self._last_price - signal.breakout_price)
+                max_drift = self._live_config.max_entry_drift_atr * atr
+                if drift > max_drift:
+                    self._log.warning(
+                        f"{self.pair_name}: ENTRY DRIFT ABORT — "
+                        f"price moved {drift:.4f} ({drift/atr:.2f} ATR) "
+                        f"during LLM latency. Max allowed: {max_drift:.4f} "
+                        f"({self._live_config.max_entry_drift_atr} ATR). "
+                        f"Breakout={signal.breakout_price}, "
+                        f"current={self._last_price}")
+                    return
 
-        # Guard: shared TradeManager may have been claimed by another strategy
+        # Secondary in_trade guard (race condition: another strategy may have
+        # entered during LLM latency)
         if self._trade_manager.in_trade:
             self._log.info(
                 f"{self.pair_name}[{self.strategy_name}]: "
@@ -416,6 +433,19 @@ class InstrumentEngine:
                 return (f"Daily loss limit: ${tm.daily_pnl:.2f} <= "
                         f"-${self._live_config.max_daily_loss:.2f}")
         return None
+
+    def reset_session(self) -> None:
+        """Reset detector state at session boundary (e.g. 5 PM ET).
+
+        Mirrors the backtest behavior where each session gets a fresh
+        DarvasDetector. Without this, the detector can get stuck in
+        partially-formed box states indefinitely.
+        Uses reset_formation() to preserve ATR — only the box state machine resets.
+        """
+        self._detector.reset_formation()
+        self._log.info(
+            f"{self.pair_name}[{self.strategy_name}]: "
+            f"Session reset — detector formation state cleared (ATR preserved)")
 
     def add_historical_bar(self, bar: Bar) -> None:
         """Add a historical bar to seed the buffer and detector."""
