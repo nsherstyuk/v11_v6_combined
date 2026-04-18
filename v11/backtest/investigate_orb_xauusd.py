@@ -356,30 +356,33 @@ def main():
             f"{om['N']:>6} {oos_per_yr:>5.1f} {om['WR']:>7.1f} {om['AvgR']:>9.3f}"
         )
 
-    # ── Year-by-year OOS ──────────────────────────────────────────────────
+    # ── Year-by-year ALL years (tag OOS vs IS) ────────────────────────────
+    # Surfaces regime concentration (e.g. 2025 outlier that Cascade's
+    # backtest_orb_xauusd.py flagged: a single year carrying 50%+ of P&L).
     for label, trades in results.items():
-        _, oos_trades = _split(trades)
         print()
         print("=" * W)
-        print(f"  YEAR-BY-YEAR OOS ({label})")
+        print(f"  YEAR-BY-YEAR ({label})  [OOS = 2018-2023, IS = 2024+]")
         print("=" * W)
         print(f"  {'Year':<12} {'N':>5} {'WR%':>7} {'AvgR':>8} {'PF':>6} {'MaxDD':>7}")
         print("  " + "-" * 50)
 
-        by_year = _split_by_year(oos_trades)
+        by_year = _split_by_year(trades)
         for yr in sorted(by_year.keys()):
             m = _metrics(by_year[yr])
             pf_str = f"{m['PF']:.2f}" if m["PF"] != float("inf") else "  inf"
+            tag = "OOS" if yr <= 2023 else "IS "
             print(
-                f"  {yr:<12} {m['N']:>5} {m['WR']:>7.1f} {m['AvgR']:>8.3f} "
+                f"  {yr} ({tag})   {m['N']:>5} {m['WR']:>7.1f} {m['AvgR']:>8.3f} "
                 f"{pf_str:>6} {m['MaxDD']:>7.3f}"
             )
 
+        _, oos_trades = _split(trades)
         m_all = _metrics(oos_trades)
         pf_str = f"{m_all['PF']:.2f}" if m_all["PF"] != float("inf") else "  inf"
         print("  " + "-" * 50)
         print(
-            f"  {'TOTAL':<12} {m_all['N']:>5} {m_all['WR']:>7.1f} {m_all['AvgR']:>8.3f} "
+            f"  {'OOS TOTAL':<12} {m_all['N']:>5} {m_all['WR']:>7.1f} {m_all['AvgR']:>8.3f} "
             f"{pf_str:>6} {m_all['MaxDD']:>7.3f}"
         )
 
