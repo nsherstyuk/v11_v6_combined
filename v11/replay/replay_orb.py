@@ -310,11 +310,10 @@ class ReplayORBExecutionEngine(ExecutionEngine):
         self._sl_price: float = 0.0
         self._tp_price: float = 0.0
 
-    def set_orb_brackets(self, range_info: RangeInfo, rr_ratio: float):
-        """Set bracket levels from range info."""
+    def set_orb_brackets(self, range_info: RangeInfo, rr_ratio: float) -> bool:
+        """Set bracket levels from range info. Returns True (always succeeds in replay)."""
         d = self._config.price_decimals
         rs = range_info.size
-
         self._long_entry = range_info.high
         self._short_entry = range_info.low
         self._long_sl = range_info.low
@@ -322,12 +321,12 @@ class ReplayORBExecutionEngine(ExecutionEngine):
         self._short_sl = range_info.high
         self._short_tp = round(range_info.low - rr_ratio * rs, d)
         self._brackets_active = True
-
         self._log.info(
             f"ORB brackets set: LONG@{self._long_entry:.{d}f} "
             f"SL={self._long_sl:.{d}f} TP={self._long_tp:.{d}f} | "
             f"SHORT@{self._short_entry:.{d}f} "
             f"SL={self._short_sl:.{d}f} TP={self._short_tp:.{d}f}")
+        return True
 
     def cancel_orb_brackets(self):
         """Cancel resting entry brackets."""

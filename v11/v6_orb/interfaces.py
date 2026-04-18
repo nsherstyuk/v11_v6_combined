@@ -57,8 +57,9 @@ class ExecutionEngine(ABC):
     """
 
     @abstractmethod
-    def set_orb_brackets(self, range_info: RangeInfo, rr_ratio: float):
-        """Place OCA entry stop brackets for the ORB breakout strategy."""
+    def set_orb_brackets(self, range_info: RangeInfo, rr_ratio: float) -> bool:
+        """Place OCA entry stop brackets for the ORB breakout strategy.
+        Returns True if placement succeeded, False if it failed (e.g. disconnection)."""
         pass
 
     @abstractmethod

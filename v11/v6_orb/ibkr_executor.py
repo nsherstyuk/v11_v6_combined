@@ -69,7 +69,7 @@ class IBKRExecutionEngine(ExecutionEngine):
                 f"SELL STP @ {range_info.low:.{d}f}")
             self.buy_entry_id = -1  # sentinel for dry-run
             self.sell_entry_id = -1
-            return
+            return True
 
         from ib_insync import Order
 
@@ -111,8 +111,13 @@ class IBKRExecutionEngine(ExecutionEngine):
                 f"Entry stops placed: BUY id={self.buy_entry_id} "
                 f"@ {range_info.high:.{d}f}, SELL id={self.sell_entry_id} "
                 f"@ {range_info.low:.{d}f} (OCA={oca_group})")
+            return True
         except Exception as e:
             self.logger.error(f"Entry placement failed: {e}")
+            # Reset IDs so has_resting_entries() returns False
+            self.buy_entry_id = 0
+            self.sell_entry_id = 0
+            return False
 
     def cancel_orb_brackets(self):
         """Cancel resting entry brackets (not SL/TP)."""

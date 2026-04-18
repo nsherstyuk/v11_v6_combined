@@ -191,9 +191,14 @@ class ORBStrategy:
                 self.logger.info(
                     f"Velocity {vel:.0f} >= {cfg.velocity_threshold:.0f}, "
                     f"placing brackets")
-                execution.set_orb_brackets(self.range, cfg.rr_ratio)
-                self.orders_placed_time = tick.timestamp
-                self.state = StrategyState.ORDERS_PLACED
+                placed = execution.set_orb_brackets(self.range, cfg.rr_ratio)
+                if placed:
+                    self.orders_placed_time = tick.timestamp
+                    self.state = StrategyState.ORDERS_PLACED
+                else:
+                    self.logger.warning(
+                        "Bracket placement failed — staying RANGE_READY, "
+                        "will retry on next tick")
         else:
             if self.state == StrategyState.ORDERS_PLACED:
                 # Hysteresis: use 90% threshold to avoid cycling
