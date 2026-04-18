@@ -282,10 +282,12 @@ class ORBAdapter:
 
     async def on_bar(self, bar) -> None:
         """Store bar for velocity calculation; evaluate LLM gate when pending."""
-        # Replace BarAggregator's snapshot tick_count (~60/min constant) with
-        # real market tick count from IBKR historical data. This is required for
-        # the velocity filter threshold (168) to work as calibrated.
-        bar = await self._enrich_bar_tick_count(bar)
+        # Bar enrichment via reqHistoricalDataAsync was removed 2026-04-16:
+        # per-minute historical requests on the same contract contended with
+        # the reqMktData stream, causing XAUUSD tick starvation and IB 366
+        # cancel-warnings. The velocity filter is now disabled in
+        # XAUUSD_ORB_CONFIG (extended backtest showed velocity=OFF > ON OOS),
+        # so the snapshot tick_count from BarAggregator is acceptable.
         self._bar_buffer.append(bar)
 
         if not self._llm_gate_pending:

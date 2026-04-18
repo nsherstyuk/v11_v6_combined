@@ -757,8 +757,13 @@ class TestBarTickCountEnrichment:
         assert result is bar
 
     @pytest.mark.asyncio
-    async def test_on_bar_uses_enriched_tick_count(self, adapter):
-        """on_bar uses enriched tick_count when IBKR provides real volume."""
+    async def test_on_bar_does_not_enrich_tick_count(self, adapter):
+        """on_bar buffers the raw bar without per-bar historical enrichment.
+
+        Per-minute reqHistoricalDataAsync contended with reqMktData stream and
+        starved the live tick feed (IB 366 warnings, PRICE STALE). Enrichment
+        was removed 2026-04-16; velocity filter is now disabled in config.
+        """
         bar = self._make_bar(tick_count=60)
         ibkr_bar = self._make_ibkr_bar(volume=215)
         adapter._ib.reqHistoricalDataAsync = AsyncMock(return_value=[ibkr_bar])
@@ -766,4 +771,5 @@ class TestBarTickCountEnrichment:
         await adapter.on_bar(bar)
 
         assert len(adapter._bar_buffer) == 1
-        assert adapter._bar_buffer[0].tick_count == 215
+        assert adapter._bar_buffer[0].tick_count == 60
+        adapter._ib.reqHistoricalDataAsync.assert_not_called()
