@@ -147,8 +147,16 @@ async def fetch_hour(client: httpx.AsyncClient, dt: datetime,
                 continue
             else:
                 return pd.DataFrame(), 0  # other HTTP error — skip this hour
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError):
+        except httpx.HTTPError as exc:
+            # Catches TimeoutException, ConnectError, NetworkError,
+            # RemoteProtocolError, ReadError, etc. Dukascopy sometimes
+            # disconnects mid-response which raises RemoteProtocolError.
             await asyncio.sleep(3 * (attempt + 1))
+        except Exception as exc:
+            # Last-resort: log and skip this hour rather than crash the whole run.
+            print(f"    [!] unexpected error on {dt}: {type(exc).__name__}: {exc}",
+                  flush=True)
+            return pd.DataFrame(), consec_503
     # Exhausted retries
     return pd.DataFrame(), consec_503
 
