@@ -397,6 +397,7 @@ class V11LiveTrader:
 
         poll_interval = 1.0
         last_status_log = 0.0
+        last_order_reconcile = 0.0
         loop = asyncio.new_event_loop()
 
         while not self._shutdown:
@@ -475,6 +476,15 @@ class V11LiveTrader:
                     self._log_status()
                     self._write_heartbeat()
                     last_status_log = time.time()
+
+                # Periodic order reconciliation (every 60s).
+                # Catches silent IBKR-side order discards that don't
+                # propagate as exceptions or via orderStatusEvent (e.g.
+                # the 2026-04-20 incident where entry orders were
+                # Cancelled by IBKR's preset but V11 never learned).
+                if time.time() - last_order_reconcile > 60:
+                    self._reconcile_orders()
+                    last_order_reconcile = time.time()
 
                 self.conn.sleep(poll_interval)
 
@@ -668,6 +678,64 @@ class V11LiveTrader:
             f"{stats['assessed']} assessed, "
             f"accuracy={stats['accuracy_pct']}%"
             f" (C={stats['correct']} W={stats['wrong']} M={stats['missed']})")
+
+    def _reconcile_orders(self) -> None:
+        """Periodic reconciliation of V11's internal order state vs IBKR's
+        actual order book.
+
+        Scenario this catches (2026-04-20 incident): V11's executor places
+        orders, gets orderIds back, updates internal state to ORDERS_PLACED.
+        IBKR silently discards one or both (e.g. TIF rejection, risk-system
+        discard). orderStatusEvent *should* fire, but if for any reason
+        it doesn't (handler not hooked, event loop starved, etc.), V11's
+        internal state drifts from reality.
+
+        This method queries ib.openTrades() and cross-references against
+        each ORB adapter's (buy_entry_id, sell_entry_id). If V11 thinks
+        an order is live but IBKR has no record, log ERROR and notify
+        the adapter so it can surface the failure.
+        """
+        if not self.conn.connected:
+            return
+        try:
+            live_order_ids = {t.order.orderId for t in self.conn.ib.openTrades()
+                              if t.orderStatus.status in
+                              ('Submitted', 'PreSubmitted', 'PendingSubmit', 'ApiPending')}
+        except Exception as e:
+            self.log.warning(f"Order reconcile: could not fetch openTrades: {e}")
+            return
+
+        for engine in getattr(self.runner, "engines", []):
+            exec_ = getattr(engine, "_execution", None)
+            if exec_ is None:
+                continue
+            buy_id = getattr(exec_, "buy_entry_id", 0)
+            sell_id = getattr(exec_, "sell_entry_id", 0)
+            if buy_id <= 0 and sell_id <= 0:
+                continue  # nothing V11 thinks is live for this engine
+
+            expected = {oid for oid in (buy_id, sell_id) if oid > 0}
+            missing = expected - live_order_ids
+            if missing:
+                self.log.error(
+                    f"ORDER RECONCILE: {engine.pair_name} executor has "
+                    f"ids {sorted(expected)} but IBKR openTrades shows "
+                    f"only {sorted(expected & live_order_ids)}. "
+                    f"MISSING={sorted(missing)}. Order(s) likely "
+                    f"discarded by IBKR. Clearing IDs so strategy can "
+                    f"recover state on next tick.")
+                # Surface this via executor's failure flag if available,
+                # and reset order IDs so has_resting_entries() returns
+                # False, allowing the strategy to retry placement or
+                # go DONE_TODAY depending on context.
+                if hasattr(exec_, "_entry_failed"):
+                    exec_._entry_failed = True
+                    exec_._entry_failure_reason = (
+                        f"reconcile: missing orders at IBKR {sorted(missing)}")
+                if buy_id in missing:
+                    exec_.buy_entry_id = 0
+                if sell_id in missing:
+                    exec_.sell_entry_id = 0
 
     def _check_price_staleness(self) -> None:
         """Check for stale price feeds and log warnings/errors.

@@ -1,6 +1,20 @@
 """
 V6 IBKRExecutionEngine — copied from C:\\nautilus0\\v6_orb_refactor\\live\\ibkr_executor.py
-DO NOT MODIFY — frozen V6 code. Only import paths changed.
+
+Originally frozen. Modifications in this V11 copy (documented, not drift):
+  - 2026-04-17: set_orb_brackets returns bool + resets IDs on failure
+                (silent-order-failure bug fix)
+  - 2026-04-20: set_orb_brackets calls ib.disconnect() on
+                connectivity-class errors to trigger reconnect
+                (silent half-open socket fix)
+  - 2026-04-20: TIF changed from GTD to DAY (IBKR paper preset rejects
+                GTD via Error 10349, silently Cancels order). DAY is
+                what IBKR's preset forces anyway; matching it prevents
+                the rejection.
+  - 2026-04-20: orderStatusEvent listener hooked for per-order status
+                tracking. When an entry order transitions to
+                Cancelled/Inactive before filling, we log it and
+                surface it so the strategy can handle the failure.
 """
 import logging
 import math
@@ -43,6 +57,16 @@ class IBKRExecutionEngine(ExecutionEngine):
         self.sl_order_id: int = 0
         self.tp_order_id: int = 0
 
+        # Entry-order failure detection (2026-04-20):
+        # When an entry order reaches a terminal non-Filled state
+        # (Cancelled, Inactive, ApiCancelled) before we see a Fill,
+        # something went wrong at IBKR (TIF rejection, risk-system
+        # discard, etc.). The orderStatusEvent listener sets this flag
+        # and the strategy polls entry_placement_failed() to detect it.
+        self._entry_failed: bool = False
+        self._entry_failure_reason: str = ""
+        self._hooked_status_event: bool = False
+
         # Position state
         self._position: int = 0  # 1=LONG, -1=SHORT, 0=flat
         self._direction: Optional[str] = None
@@ -77,15 +101,14 @@ class IBKRExecutionEngine(ExecutionEngine):
         oca_group = (f"ORB_{self.contract.symbol}_{self._trade_date}_"
                      f"{now.strftime('%H%M%S')}")
 
-        # GTD expiry at trade_end_hour
-        trade_end = now.replace(
-            hour=self.trade_end_hour, minute=0, second=0, microsecond=0)
-        gtd_time = trade_end.strftime("%Y%m%d %H:%M:%S UTC")
-
+        # TIF=DAY: IBKR paper-account preset rejects GTD with Error 10349
+        # and silently Cancels the order. DAY matches what the preset
+        # forces anyway. The order expires naturally at EOD; V11's
+        # max_pending_hours check cancels earlier if no trigger.
         buy_entry = Order(
             action="BUY", orderType="STP", totalQuantity=self.quantity,
             auxPrice=round(range_info.high, d),
-            tif="GTD", goodTillDate=gtd_time,
+            tif="DAY",
             ocaGroup=oca_group, ocaType=1,
             transmit=False,
         )
@@ -93,12 +116,18 @@ class IBKRExecutionEngine(ExecutionEngine):
         sell_entry = Order(
             action="SELL", orderType="STP", totalQuantity=self.quantity,
             auxPrice=round(range_info.low, d),
-            tif="GTD", goodTillDate=gtd_time,
+            tif="DAY",
             ocaGroup=oca_group, ocaType=1,
             transmit=True,
         )
 
         try:
+            # Reset failure tracking for this placement cycle and hook
+            # orderStatusEvent so we see every IBKR-side transition.
+            self._entry_failed = False
+            self._entry_failure_reason = ""
+            self._hook_status_event_once()
+
             buy_trade = self.ib.placeOrder(self.contract, buy_entry)
             self.ib.sleep(1)
             self.buy_entry_id = buy_trade.order.orderId
@@ -132,6 +161,79 @@ class IBKRExecutionEngine(ExecutionEngine):
                 except Exception:
                     pass
             return False
+
+    def entry_placement_failed(self) -> bool:
+        """True if an entry order reached a terminal non-Filled state
+        (Cancelled/Inactive/ApiCancelled) between placement and fill.
+
+        Set by the orderStatusEvent listener. Polled by the adapter /
+        strategy to detect silent IBKR-side discards. When True, the
+        caller should clear state and treat it as a failed placement
+        (equivalent to set_orb_brackets() returning False)."""
+        return self._entry_failed
+
+    def entry_failure_reason(self) -> str:
+        return self._entry_failure_reason
+
+    def clear_entry_failure(self) -> None:
+        """Called after the caller has handled the failure."""
+        self._entry_failed = False
+        self._entry_failure_reason = ""
+
+    def _hook_status_event_once(self) -> None:
+        """Attach orderStatusEvent listener. Idempotent — safe to call
+        multiple times; we only attach one handler per executor."""
+        if self._hooked_status_event:
+            return
+        try:
+            self.ib.orderStatusEvent += self._on_order_status
+            self._hooked_status_event = True
+            self.logger.debug("Hooked orderStatusEvent listener")
+        except Exception as e:
+            self.logger.warning(f"Could not hook orderStatusEvent: {e}")
+
+    def _on_order_status(self, trade) -> None:
+        """Per-order status callback. Fires on every IBKR-side
+        transition for orders owned by this client.
+
+        Responsibilities:
+          (a) Log every transition (paper-trail for forensics)
+          (b) If an entry order reaches a terminal non-Filled state
+              before we've seen a Fill, mark entry_placement_failed.
+
+        We only act on orders we recognize (buy_entry_id or
+        sell_entry_id). Other orders (SL, TP, other clients' orders)
+        are ignored here."""
+        try:
+            oid = trade.order.orderId
+            status = trade.orderStatus.status
+            filled = trade.orderStatus.filled
+            remaining = trade.orderStatus.remaining
+            is_ours = oid in (self.buy_entry_id, self.sell_entry_id)
+            if not is_ours:
+                return
+            self.logger.info(
+                f"orderStatusEvent: id={oid} status={status} "
+                f"filled={filled}/{remaining}")
+            TERMINAL_NON_FILLED = ("Cancelled", "Inactive", "ApiCancelled")
+            if status in TERMINAL_NON_FILLED and filled == 0:
+                # Pull the last log entry for the failure reason
+                reason = status
+                try:
+                    if trade.log:
+                        last_log = trade.log[-1]
+                        if last_log.message:
+                            reason = f"{status}: {last_log.message}"
+                except Exception:
+                    pass
+                self._entry_failed = True
+                self._entry_failure_reason = reason
+                self.logger.error(
+                    f"Entry order {oid} reached terminal non-Filled state: "
+                    f"{reason}. Marking entry_placement_failed.")
+        except Exception as e:
+            # Never let the callback crash — it runs on ib_insync's event loop
+            self.logger.warning(f"orderStatusEvent handler error: {e}")
 
     def cancel_orb_brackets(self):
         """Cancel resting entry brackets (not SL/TP)."""

@@ -156,6 +156,28 @@ class ORBStrategy:
             self.state = StrategyState.DONE_TODAY
             return
 
+        # Async placement failure (orderStatusEvent listener set this
+        # on the executor when entry orders reached a terminal non-
+        # Filled state, e.g. IBKR silently Cancelled or reconciler
+        # detected the order missing from IBKR's open book).
+        if (self.state == StrategyState.ORDERS_PLACED
+                and hasattr(execution, "entry_placement_failed")
+                and execution.entry_placement_failed()):
+            reason = getattr(execution, "entry_failure_reason", lambda: "?")()
+            self.logger.error(
+                f"Entry orders failed after placement (reason: {reason}). "
+                f"Falling back to RANGE_READY; will retry if velocity "
+                f"still passes on next tick.")
+            try:
+                execution.cancel_orb_brackets()
+            except Exception:
+                pass
+            if hasattr(execution, "clear_entry_failure"):
+                execution.clear_entry_failure()
+            self.orders_placed_time = None
+            self.state = StrategyState.RANGE_READY
+            return
+
         # Max pending hours: cancel if entries rest too long
         if (self.state == StrategyState.ORDERS_PLACED
                 and cfg.max_pending_hours > 0
