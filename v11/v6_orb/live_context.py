@@ -388,20 +388,57 @@ class LiveMarketContext(MarketContext):
 
         except Exception as e:
             self.logger.error(f"IBKR historical bars failed: {e}")
+            # Connectivity-class errors mean the socket is half-open
+            # (TCP up, API dead). Force ib.disconnect() so the main loop's
+            # ensure_connected() will see it and trigger a real reconnect.
+            err_str = str(e).lower()
+            if "not connected" in err_str or "connection" in err_str or "timeout" in err_str:
+                self.logger.error(
+                    "Connectivity-class error on historical fetch — "
+                    "forcing ib.disconnect() to trigger reconnect cycle")
+                try:
+                    self.ib.disconnect()
+                except Exception:
+                    pass
             return None
 
     def calculate_daily_range(self, start_hour: int,
                                end_hour: int) -> Optional[RangeInfo]:
         """Calculate range using best available method.
-        Tries IBKR historical bars first, falls back to tick buffer."""
+        Tries IBKR historical bars first, falls back to tick buffer.
+        Applies a plausibility check to catch silent data-source failures
+        that produce absurdly small ranges (e.g. fallback-to-ticks with
+        only 2h of tick buffer produces a 4-point XAUUSD range)."""
         # Primary: IBKR historical bars (works even if process started late)
         rng = self.calculate_range_from_ibkr_bars(start_hour, end_hour)
-        if rng:
-            return rng
+        source = "IBKR historical bars"
+        if not rng:
+            # Fallback: tick buffer (only if process was running full window)
+            self.logger.info("Falling back to tick buffer for range calculation")
+            rng = self.calculate_range_from_ticks(start_hour, end_hour)
+            source = "tick buffer fallback"
 
-        # Fallback: tick buffer (only if process was running full window)
-        self.logger.info("Falling back to tick buffer for range calculation")
-        return self.calculate_range_from_ticks(start_hour, end_hour)
+        if rng is None:
+            return None
+
+        # Plausibility check: reject physically absurd ranges regardless of
+        # config's min_range_pct (which is often set to allow very narrow
+        # quiet-day ranges). A range < 0.1% of mid-price is almost certainly
+        # a data-source failure, not a tradeable setup. For XAUUSD at $4800
+        # that threshold is ~$4.8; the 2026-04-20 incident produced a
+        # $4.52 range (0.09%) via fallback with 2h of tick data.
+        SANITY_MIN_RANGE_PCT = 0.001  # 0.1% of mid-price
+        mid = (rng.high + rng.low) / 2
+        if mid > 0 and rng.size / mid < SANITY_MIN_RANGE_PCT:
+            self.logger.error(
+                f"Range REJECTED as implausible: {rng.low:.{self._d}f}-"
+                f"{rng.high:.{self._d}f} (size={rng.size:.{self._d}f}, "
+                f"{rng.size / mid * 100:.3f}% of mid={mid:.{self._d}f}) "
+                f"from {source}. Likely upstream data-source failure; "
+                f"staying IDLE rather than proceeding with bogus range.")
+            return None
+
+        return rng
 
     # ── Per-minute tick counts (for velocity CSV logging) ────────────
 

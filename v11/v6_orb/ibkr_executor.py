@@ -117,6 +117,20 @@ class IBKRExecutionEngine(ExecutionEngine):
             # Reset IDs so has_resting_entries() returns False
             self.buy_entry_id = 0
             self.sell_entry_id = 0
+            # If the error indicates a dead socket (silent half-open state
+            # where TCP looks up but IBKR API is unresponsive), force the
+            # socket closed. That fires ib_insync's disconnectedEvent which
+            # our reconnect flow catches. Without this, the main loop's
+            # ensure_connected() sees isConnected()==True and never reconnects.
+            err_str = str(e).lower()
+            if "not connected" in err_str or "connection" in err_str or "timeout" in err_str:
+                self.logger.error(
+                    "Connectivity-class error on placement — forcing "
+                    "ib.disconnect() to trigger reconnect cycle")
+                try:
+                    self.ib.disconnect()
+                except Exception:
+                    pass
             return False
 
     def cancel_orb_brackets(self):
