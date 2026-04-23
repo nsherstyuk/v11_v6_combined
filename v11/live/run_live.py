@@ -486,6 +486,24 @@ class V11LiveTrader:
                     self._reconcile_orders()
                     last_order_reconcile = time.time()
 
+                # Placement-stuck tripwire (2026-04-23). If any ORB engine
+                # has been failing to place orders with "Not connected" for
+                # >~30s despite the reconnect path, exit non-zero so the
+                # start_v11.bat auto-restart wrapper brings V11 back with
+                # a fresh socket. This is the belt-and-suspenders path that
+                # would have saved 4h of unproductive spam on 2026-04-23.
+                for engine in self.runner.engines:
+                    ex = getattr(engine, "_execution", None)
+                    if ex is not None and getattr(ex, "placement_stuck", False):
+                        pair = getattr(engine, "pair_name", "?")
+                        self.log.critical(
+                            f"STUCK: {pair} executor stuck after "
+                            f"{ex._consec_placement_conn_failures} consecutive "
+                            f"connectivity-class placement failures — exiting "
+                            f"with code 1 so wrapper restarts with fresh socket")
+                        self._cleanup()
+                        sys.exit(1)
+
                 self.conn.sleep(poll_interval)
 
             except KeyboardInterrupt:
@@ -697,12 +715,16 @@ class V11LiveTrader:
         """
         if not self.conn.connected:
             return
+        TERMINAL = ('Filled', 'Cancelled', 'ApiCancelled', 'Inactive')
+        ACTIVE = ('Submitted', 'PreSubmitted', 'PendingSubmit', 'ApiPending')
         try:
-            live_order_ids = {t.order.orderId for t in self.conn.ib.openTrades()
-                              if t.orderStatus.status in
-                              ('Submitted', 'PreSubmitted', 'PendingSubmit', 'ApiPending')}
+            all_trades = list(self.conn.ib.trades())
+            live_order_ids = {t.order.orderId for t in all_trades
+                              if t.orderStatus.status in ACTIVE}
+            terminal_ids = {t.order.orderId for t in all_trades
+                            if t.orderStatus.status in TERMINAL}
         except Exception as e:
-            self.log.warning(f"Order reconcile: could not fetch openTrades: {e}")
+            self.log.warning(f"Order reconcile: could not fetch trades: {e}")
             return
 
         for engine in getattr(self.runner, "engines", []):
@@ -713,6 +735,19 @@ class V11LiveTrader:
             sell_id = getattr(exec_, "sell_entry_id", 0)
             if buy_id <= 0 and sell_id <= 0:
                 continue  # nothing V11 thinks is live for this engine
+
+            # An ID that IBKR reports in a terminal state (Filled/Cancelled)
+            # is NOT missing — it's just done. The executor should have
+            # cleared it; if it didn't, clean it up here silently rather
+            # than raising a false "discarded by IBKR" alarm.
+            #  — fixes 2026-04-21 false-positive reconcile incident.
+            for oid, attr in ((buy_id, "buy_entry_id"), (sell_id, "sell_entry_id")):
+                if oid > 0 and oid in terminal_ids:
+                    setattr(exec_, attr, 0)
+            buy_id = getattr(exec_, "buy_entry_id", 0)
+            sell_id = getattr(exec_, "sell_entry_id", 0)
+            if buy_id <= 0 and sell_id <= 0:
+                continue
 
             expected = {oid for oid in (buy_id, sell_id) if oid > 0}
             missing = expected - live_order_ids
@@ -780,6 +815,66 @@ class V11LiveTrader:
         try:
             status = self.runner.get_all_status()
             risk = status['risk']
+
+            # P2.7 (2026-04-21): per-instrument protection view. Lets the
+            # stop/alert script detect a naked position (in_trade=true but
+            # has_sl=false) even if logs are being missed.
+            broker_by_conid: dict[int, float] = {}
+            try:
+                if self.conn.connected:
+                    for p in self.conn.ib.positions():
+                        cid = getattr(p.contract, "conId", None)
+                        if cid is not None:
+                            broker_by_conid[cid] = float(p.position)
+            except Exception:
+                pass
+
+            active_ids_by_conid: dict[int, set[int]] = {}
+            try:
+                if self.conn.connected:
+                    for t in self.conn.ib.openTrades():
+                        st = getattr(t.orderStatus, "status", "")
+                        if st in ("Submitted", "PreSubmitted",
+                                  "PendingSubmit", "ApiPending"):
+                            cid = getattr(t.contract, "conId", None)
+                            oid = getattr(t.order, "orderId", None)
+                            if cid is not None and oid is not None:
+                                active_ids_by_conid.setdefault(cid, set()).add(oid)
+            except Exception:
+                pass
+
+            engine_by_pair = {
+                getattr(e, "pair_name", None): e
+                for e in self.runner.engines
+                if getattr(e, "pair_name", None)
+            }
+
+            strategies_out = []
+            for s in status['strategies']:
+                entry = {
+                    "name": s.get('strategy_name', '?'),
+                    "pair": s.get('pair_name', '?'),
+                    "in_trade": s.get('in_trade', False),
+                    "bars": s.get('bar_count', 0),
+                    "has_sl": None,
+                    "has_tp": None,
+                    "broker_pos": None,
+                    "internal_pos": None,
+                }
+                eng = engine_by_pair.get(entry["pair"])
+                execn = getattr(eng, "_execution", None) if eng else None
+                if execn is not None:
+                    cid = getattr(execn.contract, "conId", None)
+                    active = active_ids_by_conid.get(cid, set())
+                    sl = getattr(execn, "sl_order_id", 0) or 0
+                    tp = getattr(execn, "tp_order_id", 0) or 0
+                    entry["has_sl"] = bool(sl) and sl in active
+                    entry["has_tp"] = bool(tp) and tp in active
+                    entry["internal_pos"] = getattr(execn, "_position", 0)
+                    if cid is not None:
+                        entry["broker_pos"] = broker_by_conid.get(cid, 0.0)
+                strategies_out.append(entry)
+
             state = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "connected": self.conn.connected,
@@ -788,15 +883,7 @@ class V11LiveTrader:
                 "pnl": risk['combined_pnl'],
                 "trades": risk['combined_trades'],
                 "positions": len(risk['open_positions']),
-                "strategies": [
-                    {
-                        "name": s.get('strategy_name', '?'),
-                        "pair": s.get('pair_name', '?'),
-                        "in_trade": s.get('in_trade', False),
-                        "bars": s.get('bar_count', 0),
-                    }
-                    for s in status['strategies']
-                ],
+                "strategies": strategies_out,
             }
             heartbeat_file.write_text(json.dumps(state, indent=2, default=str))
         except Exception as e:
@@ -809,12 +896,42 @@ class V11LiveTrader:
         1. TradeManager: per-instrument internal state vs broker
         2. RiskManager: portfolio-level position tracking vs broker
         """
-        self.log.info("Reconciling positions after reconnect...")
+        try:
+            outage_s = float(self.conn.last_outage_s)
+        except (TypeError, ValueError):
+            outage_s = 0.0
+        self.log.info(
+            f"Reconciling positions after reconnect (outage={outage_s:.1f}s)...")
 
-        # 1. Per-instrument reconciliation (cancel open orders first so no stale
-        #    orders race with the position check, then reconcile state)
+        # 1a. ORB engines: graduated recovery (P0.3, 2026-04-21). If outage
+        #     was brief AND we still have the range in memory, re-arm SL/TP
+        #     instead of flattening; otherwise flatten. This replaces the
+        #     blanket cancel_orders_for() that wiped an active SL leg on
+        #     2026-04-21 and left a naked short for ~7h.
+        orb_pairs_handled: set[str] = set()
+        for engine in self.runner.engines:
+            execn = getattr(engine, "_execution", None)
+            if execn is None or not hasattr(execn, "reconcile_after_reconnect"):
+                continue
+            pair = getattr(engine, "pair_name", None)
+            try:
+                outcome = execn.reconcile_after_reconnect(outage_s)
+            except Exception as e:
+                self.log.error(
+                    f"reconcile_after_reconnect raised for {pair}: {e}")
+                outcome = "error"
+            self.log.info(f"reconcile[{pair}] → {outcome}")
+            if pair:
+                orb_pairs_handled.add(pair)
+
+        # 1b. Non-ORB feeds keep the legacy reconcile path (cancel opens +
+        #     trade_manager.reconcile_position). Skip any pair already
+        #     handled by the ORB graduated path above.
         for feed in self.runner.feeds.values():
-            self.conn.cancel_orders_for(feed.inst_config.pair_name)
+            pair = feed.inst_config.pair_name
+            if pair in orb_pairs_handled:
+                continue
+            self.conn.cancel_orders_for(pair)
             feed.trade_manager.reconcile_position()
 
         # 2. Portfolio-level reconciliation (RiskManager vs broker)

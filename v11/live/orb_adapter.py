@@ -66,6 +66,7 @@ class ORBAdapter:
         poll_interval: float = 2.0,
         llm_filter=None,
         llm_confidence_threshold: int = 75,
+        force_disconnect_callback=None,
     ):
         """
         Args:
@@ -98,6 +99,7 @@ class ORBAdapter:
             price_decimals=v6_config.price_decimals,
             state_dir=state_dir or None,
             logger=log,
+            force_disconnect_callback=force_disconnect_callback,
         )
 
         self._execution = IBKRExecutionEngine(
@@ -109,6 +111,7 @@ class ORBAdapter:
             price_decimals=v6_config.price_decimals,
             dry_run=dry_run,
             logger=log,
+            force_disconnect_callback=force_disconnect_callback,
         )
 
         # ── LLM gate (optional) ───────────────────────────────────

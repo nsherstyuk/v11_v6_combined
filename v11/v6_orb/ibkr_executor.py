@@ -18,6 +18,7 @@ Originally frozen. Modifications in this V11 copy (documented, not drift):
 """
 import logging
 import math
+import time
 from datetime import datetime, timezone
 from typing import Optional, Callable
 
@@ -41,7 +42,8 @@ class IBKRExecutionEngine(ExecutionEngine):
                  trade_end_hour: int = 16,
                  price_decimals: int = 2,
                  dry_run: bool = False,
-                 logger: Optional[logging.Logger] = None):
+                 logger: Optional[logging.Logger] = None,
+                 force_disconnect_callback: Optional[Callable[[str], None]] = None):
         self.ib = ib
         self.contract = contract
         self.quantity = quantity
@@ -50,6 +52,18 @@ class IBKRExecutionEngine(ExecutionEngine):
         self._d = price_decimals
         self.dry_run = dry_run
         self.logger = logger or logging.getLogger(__name__)
+        # 2026-04-23: connection-level force-disconnect. Calling raw
+        # ib.disconnect() on a half-open socket is not reliable — ib_insync
+        # may silently no-op, disconnectedEvent never fires, and the main
+        # loop never reconnects. The connection layer owns reliable state
+        # transitions, so we route through it when available.
+        self._force_disconnect = force_disconnect_callback
+
+        # 2026-04-23: track consecutive connectivity-class placement
+        # failures so the main loop can exit (→ wrapper restart) if the
+        # reconnect path cannot recover. Threshold ~30s of 2s-poll spam.
+        self._consec_placement_conn_failures: int = 0
+        self._placement_stuck_threshold: int = 15
 
         # Order tracking (IDs for state persistence)
         self.buy_entry_id: int = 0
@@ -78,6 +92,22 @@ class IBKRExecutionEngine(ExecutionEngine):
 
         # Trade date for OCA naming
         self._trade_date: str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+
+        # Throttle for broker-truth queries in close_at_market / invariant
+        # checks (avoid spamming ib.positions() when strategy ticks multiple
+        # times per second). 2026-04-21 incident: close_at_market fired every
+        # 2s for 5h while an orphan sat unprotected — internal flag said
+        # "no position" but broker had one.
+        self._last_broker_truth_check_ts: float = 0.0
+        self._broker_truth_interval_s: float = 30.0
+
+        # Naked-position invariant (P2.6, 2026-04-21): if we have a position
+        # and no active SL/TP at broker for > grace_s seconds, force-flatten.
+        # Grace covers normal entry→SL/TP placement round-trip (~sub-second).
+        self._entry_fill_ts: Optional[float] = None
+        self._naked_grace_s: float = 15.0
+        self._last_invariant_check_ts: float = 0.0
+        self._invariant_interval_s: float = 5.0
 
     # ── Public interface ─────────────────────────────────────────────
 
@@ -140,27 +170,52 @@ class IBKRExecutionEngine(ExecutionEngine):
                 f"Entry stops placed: BUY id={self.buy_entry_id} "
                 f"@ {range_info.high:.{d}f}, SELL id={self.sell_entry_id} "
                 f"@ {range_info.low:.{d}f} (OCA={oca_group})")
+            self._consec_placement_conn_failures = 0
             return True
         except Exception as e:
             self.logger.error(f"Entry placement failed: {e}")
             # Reset IDs so has_resting_entries() returns False
             self.buy_entry_id = 0
             self.sell_entry_id = 0
-            # If the error indicates a dead socket (silent half-open state
-            # where TCP looks up but IBKR API is unresponsive), force the
-            # socket closed. That fires ib_insync's disconnectedEvent which
-            # our reconnect flow catches. Without this, the main loop's
-            # ensure_connected() sees isConnected()==True and never reconnects.
             err_str = str(e).lower()
             if "not connected" in err_str or "connection" in err_str or "timeout" in err_str:
+                self._consec_placement_conn_failures += 1
                 self.logger.error(
-                    "Connectivity-class error on placement — forcing "
-                    "ib.disconnect() to trigger reconnect cycle")
-                try:
-                    self.ib.disconnect()
-                except Exception:
-                    pass
+                    f"Connectivity-class error on placement "
+                    f"(consec={self._consec_placement_conn_failures}/"
+                    f"{self._placement_stuck_threshold}) — forcing reconnect")
+                # Route through the connection's force_disconnect when
+                # available (2026-04-23). Raw ib.disconnect() as a fallback
+                # is NOT reliable on half-open sockets — kept only so this
+                # code path still does *something* if the callback wasn't
+                # wired (e.g. legacy tests).
+                if self._force_disconnect is not None:
+                    try:
+                        self._force_disconnect("placement_not_connected")
+                    except Exception as cb_err:
+                        self.logger.warning(
+                            f"force_disconnect callback raised: {cb_err}")
+                else:
+                    try:
+                        self.ib.disconnect()
+                    except Exception:
+                        pass
+            else:
+                # Non-connectivity error — don't count toward stuck threshold.
+                self._consec_placement_conn_failures = 0
             return False
+
+    @property
+    def placement_stuck(self) -> bool:
+        """True if too many consecutive connectivity-class placement
+        failures have occurred without a successful placement. The main
+        loop uses this as a trip-wire: when stuck, it exits with a
+        non-zero code so the auto-restart wrapper brings V11 back with a
+        fresh socket (2026-04-23 incident, where V11 spammed 2h of
+        'Not connected' placement errors because the reconnect path
+        silently failed)."""
+        return (self._consec_placement_conn_failures
+                >= self._placement_stuck_threshold)
 
     def entry_placement_failed(self) -> bool:
         """True if an entry order reached a terminal non-Filled state
@@ -248,9 +303,35 @@ class IBKRExecutionEngine(ExecutionEngine):
         self.sell_entry_id = 0
 
     def close_at_market(self):
-        """Close any open position at market + cancel all orders."""
+        """Close any open position at market + cancel all orders.
+
+        Consults broker truth when internal state says flat. 2026-04-21
+        incident: internal _position went to 0 after a false "vanished"
+        signal on a socket disconnect, while the broker still held the
+        short. close_at_market then logged "No position to close" every
+        2s for 5h without ever asking IBKR. Now: if internal is flat but
+        broker has a position, flatten it (throttled to once per 30s to
+        avoid hammering ib.positions() under tick-rate strategy calls).
+        """
         if self._position == 0:
-            self.logger.info("No position to close")
+            broker_qty = self._broker_position_throttled()
+            if broker_qty is None or broker_qty == 0:
+                self.logger.info("No position to close")
+                return
+            self.logger.critical(
+                f"close_at_market: internal=flat but broker={broker_qty} "
+                f"on {self.contract.symbol} — flattening orphan")
+            fill_price = self._cancel_and_close()
+            if fill_price is not None:
+                direction = "SHORT" if broker_qty < 0 else "LONG"
+                fill = Fill(
+                    timestamp=datetime.now(tz=timezone.utc),
+                    price=fill_price,
+                    direction=direction,
+                    reason="ORPHAN_FLATTEN",
+                )
+                self._reset_position()
+                self.on_fill_callback(fill)
             return
 
         direction = "SHORT" if self._position == 1 else "LONG"
@@ -330,7 +411,14 @@ class IBKRExecutionEngine(ExecutionEngine):
 
             # Check exit fills
             if self._position != 0 and (self.sl_order_id or self.tp_order_id):
-                return self._check_exit_fills()
+                filled = self._check_exit_fills()
+                if filled:
+                    return True
+
+            # Naked-position invariant (P2.6): protects against cases where
+            # a disconnect/cancel left the position without both SL and TP.
+            if self._position != 0:
+                self._check_naked_position_invariant()
 
         except Exception as e:
             self.logger.warning(f"check_fills error: {e}")
@@ -339,7 +427,13 @@ class IBKRExecutionEngine(ExecutionEngine):
     # ── Private: entry fill detection & Phase 2 ─────────────────────
 
     def _check_entry_fills(self) -> bool:
-        """Check if entry stops filled. If so, place SL/TP (Phase 2)."""
+        """Check if entry stops filled. If so, place SL/TP (Phase 2).
+
+        On fill: zero both entry IDs. The opposite-side STP is OCA-cancelled
+        by IBKR, and leaving the filled ID non-zero causes the order
+        reconciler to report it as "missing" (since terminal-status orders
+        aren't in the active openTrades filter). See 2026-04-21 incident.
+        """
         for trade in self.ib.trades():
             oid = trade.order.orderId
             if oid == self.buy_entry_id and trade.orderStatus.status == 'Filled':
@@ -347,6 +441,9 @@ class IBKRExecutionEngine(ExecutionEngine):
                 self._position = 1
                 self._direction = "LONG"
                 self._entry_price = fill_px
+                self._entry_fill_ts = time.time()
+                self.buy_entry_id = 0
+                self.sell_entry_id = 0
                 self._place_sl_tp("LONG", fill_px)
                 self._emit_entry_fill("LONG", fill_px)
                 return True
@@ -355,6 +452,9 @@ class IBKRExecutionEngine(ExecutionEngine):
                 self._position = -1
                 self._direction = "SHORT"
                 self._entry_price = fill_px
+                self._entry_fill_ts = time.time()
+                self.buy_entry_id = 0
+                self.sell_entry_id = 0
                 self._place_sl_tp("SHORT", fill_px)
                 self._emit_entry_fill("SHORT", fill_px)
                 return True
@@ -464,18 +564,230 @@ class IBKRExecutionEngine(ExecutionEngine):
             return False
         return abs(fill_price - self._entry_price) < self._range_info.size * 0.1
 
+    def reconcile_after_reconnect(self, outage_s: float) -> str:
+        """Graduated orphan recovery after IBKR reconnect (P0.3, 2026-04-21).
+
+        Called by run_live after the socket returns. Compares internal
+        position state to broker truth and takes one of:
+
+          "flat"     — broker is flat; nothing to do.
+          "ok"       — broker matches internal; no action (invariant
+                        will verify SL/TP on next tick).
+          "rearm"    — orphan, short outage (<REARM_MAX_OUTAGE_S) AND
+                        range_info still in memory → adopt position and
+                        re-place SL/TP from the same range/rr that
+                        originally protected it.
+          "flatten"  — orphan, long outage OR no range_info → market-close
+                        the position. ORB thesis ("I saw the range, saw
+                        the break, entered") is broken when we've been
+                        blind for >60s, so fabricating an SL from stale
+                        assumptions is unsafe.
+          "error"    — could not query broker; caller should retry.
+
+        See docs/journal/2026-04-21_live_plumbing_hardening.md §Q1.
+        """
+        REARM_MAX_OUTAGE_S = 60.0
+        if not self.ib.isConnected():
+            return "error"
+        try:
+            positions = self.ib.positions()
+        except Exception as e:
+            self.logger.warning(f"reconcile_after_reconnect positions(): {e}")
+            return "error"
+
+        broker_qty = 0.0
+        for p in positions:
+            if p.contract.conId == self.contract.conId:
+                broker_qty = float(p.position)
+                break
+
+        if broker_qty == 0.0 and self._position == 0:
+            return "flat"
+        if broker_qty == 0.0 and self._position != 0:
+            # Internal thought we had a position; broker says no. Likely
+            # SL/TP filled during outage. Reset local state.
+            self.logger.warning(
+                f"reconcile: internal={self._position} but broker=flat "
+                f"on {self.contract.symbol} — resetting local state "
+                f"(exit happened during {outage_s:.0f}s outage)")
+            self._cancel_all_for_contract()
+            self._reset_position()
+            return "flat"
+        # broker_qty != 0
+        if self._position != 0 and (
+                (self._position == 1 and broker_qty > 0) or
+                (self._position == -1 and broker_qty < 0)):
+            # Internal and broker agree on direction; invariant will check SL/TP.
+            return "ok"
+
+        # Orphan: broker has position, internal is flat (or disagrees).
+        has_range = self._range_info is not None
+        if outage_s < REARM_MAX_OUTAGE_S and has_range:
+            direction = "LONG" if broker_qty > 0 else "SHORT"
+            # Adopt: use broker avgCost if we can, else entry_price we had.
+            avg_cost = 0.0
+            for p in positions:
+                if p.contract.conId == self.contract.conId:
+                    avg_cost = float(p.avgCost)
+                    break
+            entry_price = avg_cost if avg_cost > 0 else self._entry_price
+            self.logger.warning(
+                f"reconcile: orphan on {self.contract.symbol} "
+                f"qty={broker_qty} outage={outage_s:.0f}s — re-arming "
+                f"SL/TP from in-memory range (direction={direction}, "
+                f"entry={entry_price})")
+            # Cancel any surviving brackets from the old OCA group first
+            # so we don't end up with duplicate SLs.
+            self._cancel_all_for_contract()
+            self._position = 1 if broker_qty > 0 else -1
+            self._direction = direction
+            self._entry_price = entry_price
+            self._entry_fill_ts = time.time()  # reset invariant grace
+            try:
+                self._place_sl_tp(direction, entry_price)
+            except Exception as e:
+                self.logger.error(
+                    f"reconcile: re-arm _place_sl_tp failed: {e} — "
+                    f"falling back to flatten")
+                fill_price = self._cancel_and_close()
+                direction_label = "SHORT" if broker_qty < 0 else "LONG"
+                fill = Fill(
+                    timestamp=datetime.now(tz=timezone.utc),
+                    price=fill_price if fill_price is not None else entry_price,
+                    direction=direction_label,
+                    reason="ORPHAN_FLATTEN",
+                )
+                self._reset_position()
+                self.on_fill_callback(fill)
+                return "flatten"
+            return "rearm"
+
+        # Long outage or no range_info — flatten.
+        reason = "outage_too_long" if not has_range else "no_range_info"
+        self.logger.critical(
+            f"reconcile: orphan on {self.contract.symbol} "
+            f"qty={broker_qty} outage={outage_s:.0f}s "
+            f"range_info={'present' if has_range else 'missing'} "
+            f"— FLATTENING (reason={reason})")
+        # Ensure our local state won't inhibit _cancel_and_close
+        self._position = 1 if broker_qty > 0 else -1
+        fill_price = self._cancel_and_close()
+        direction_label = "SHORT" if broker_qty < 0 else "LONG"
+        fill = Fill(
+            timestamp=datetime.now(tz=timezone.utc),
+            price=fill_price if fill_price is not None else self._entry_price,
+            direction=direction_label,
+            reason="ORPHAN_FLATTEN",
+        )
+        self._reset_position()
+        self.on_fill_callback(fill)
+        return "flatten"
+
+    def _check_naked_position_invariant(self) -> None:
+        """Per-tick guard (P2.6, 2026-04-21): if we hold a position AND
+        lack an active SL or TP order at the broker for longer than the
+        grace window, force-flatten.
+
+        Catches: reconnect-handler canceled a bracket leg; SL/TP placeOrder
+        call returned an id but IBKR rejected it silently; any other way
+        the bracket got stripped while we still hold inventory.
+
+        Throttled (5s default) because this runs every strategy tick.
+        Grace window (15s default) absorbs normal entry→bracket round-trip.
+        """
+        if self._position == 0:
+            return
+        if not self.ib.isConnected():
+            return
+        if self._entry_fill_ts is None:
+            return
+        now = time.time()
+        if now - self._entry_fill_ts < self._naked_grace_s:
+            return
+        if now - self._last_invariant_check_ts < self._invariant_interval_s:
+            return
+        self._last_invariant_check_ts = now
+
+        ACTIVE = ('Submitted', 'PreSubmitted', 'PendingSubmit', 'ApiPending')
+        try:
+            active_ids = {
+                t.order.orderId for t in self.ib.openTrades()
+                if (hasattr(t.contract, 'conId')
+                    and t.contract.conId == self.contract.conId
+                    and t.orderStatus.status in ACTIVE)
+            }
+        except Exception as e:
+            self.logger.warning(f"invariant check openTrades failed: {e}")
+            return
+
+        sl_ok = self.sl_order_id > 0 and self.sl_order_id in active_ids
+        tp_ok = self.tp_order_id > 0 and self.tp_order_id in active_ids
+        if sl_ok and tp_ok:
+            return
+
+        age_s = now - self._entry_fill_ts
+        self.logger.critical(
+            f"NAKED POSITION INVARIANT: {self.contract.symbol} "
+            f"pos={self._position} sl_ok={sl_ok} tp_ok={tp_ok} "
+            f"age={age_s:.0f}s — force-flatten")
+        direction = "SHORT" if self._position == 1 else "LONG"
+        fill_price = self._cancel_and_close()
+        fill = Fill(
+            timestamp=datetime.now(tz=timezone.utc),
+            price=fill_price if fill_price is not None else self._entry_price,
+            direction=direction,
+            reason="NAKED_FLATTEN",
+        )
+        self._reset_position()
+        self.on_fill_callback(fill)
+
+    def _broker_position_throttled(self) -> Optional[float]:
+        """Query broker position for this contract, throttled.
+
+        Returns signed position size, or None if unavailable (disconnected,
+        throttled, or error). Used by close_at_market and the naked-position
+        invariant to avoid calling ib.positions() on every tick.
+        """
+        now = time.time()
+        if (now - self._last_broker_truth_check_ts
+                < self._broker_truth_interval_s):
+            return None
+        self._last_broker_truth_check_ts = now
+        try:
+            if not self.ib.isConnected():
+                return None
+            for pos in self.ib.positions():
+                if pos.contract.conId == self.contract.conId:
+                    return float(pos.position)
+            return 0.0
+        except Exception as e:
+            self.logger.warning(f"_broker_position_throttled failed: {e}")
+            return None
+
     def _check_position_vanished(self) -> bool:
         """Check IBKR positions to see if position disappeared.
-        Uses double-check pattern to avoid cache-lag false positives."""
+        Uses double-check pattern to avoid cache-lag false positives.
+
+        **Connection gate (2026-04-21 incident):** ib.positions() returns []
+        when the socket is dead, which this function would otherwise read as
+        "position vanished" and falsely exit the trade at $0 PnL. Return
+        False if we're not connected — the real position state is unknown,
+        and the reconnect path is responsible for reconciling it.
+        """
         try:
+            if not self.ib.isConnected():
+                return False
             positions = self.ib.positions()
             has_pos = any(
                 p.contract.conId == self.contract.conId and abs(p.position) > 0
                 for p in positions
             )
             if not has_pos:
-                # Double-check after sleep
+                # Double-check after sleep; re-verify connection afterwards
+                # (connection can drop during the sleep).
                 self.ib.sleep(2)
+                if not self.ib.isConnected():
+                    return False
                 positions = self.ib.positions()
                 return not any(
                     p.contract.conId == self.contract.conId and abs(p.position) > 0
@@ -561,6 +873,7 @@ class IBKRExecutionEngine(ExecutionEngine):
         self._position = 0
         self._direction = None
         self._entry_price = 0.0
+        self._entry_fill_ts = None
         self.buy_entry_id = 0
         self.sell_entry_id = 0
         self.sl_order_id = 0

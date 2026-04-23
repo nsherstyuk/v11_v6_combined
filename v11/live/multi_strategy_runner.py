@@ -312,6 +312,7 @@ class MultiStrategyRunner:
             poll_interval=poll_interval,
             llm_filter=self._llm_filter,
             llm_confidence_threshold=self._live_config.orb_confidence_threshold,
+            force_disconnect_callback=self._conn.force_disconnect,
         )
 
         feed.add_strategy(adapter)

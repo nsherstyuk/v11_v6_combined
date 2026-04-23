@@ -7,7 +7,26 @@ REM GatewayManager watchdog runs in its own minimized window and
 REM survives Ctrl+C on the main V11 terminal — meaning Gateway
 REM will keep auto-restarting until you kill the watchdog too.
 REM
-REM Usage:  v11\live\stop_v11.bat
+REM Usage:  v11\live\stop_v11.bat              (normal teardown; leaves
+REM                                             broker positions untouched)
+REM         v11\live\stop_v11.bat --flatten     (also market-close any
+REM                                             open positions on the
+REM                                             trading instruments BEFORE
+REM                                             killing Gateway; see
+REM                                             v11\live\flatten.py)
+
+set FLATTEN=0
+if /I "%~1"=="--flatten" set FLATTEN=1
+
+if "%FLATTEN%"=="1" (
+    echo Pre-stop flatten requested — closing open positions first...
+    REM Known live-trading instruments. Extend list as new ones go live.
+    for %%I in (XAUUSD EURUSD USDJPY) do (
+        echo   Flattening %%I ...
+        python -m v11.live.flatten %%I
+    )
+    echo.
+)
 
 echo Stopping V11 stack...
 echo.

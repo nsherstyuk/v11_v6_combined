@@ -1,6 +1,6 @@
 # Project Status — All Trading Systems
 
-**Last updated:** 2026-04-17 ET (Phase B safety fixes: daily bar refresh, LLM timeout split, heartbeat file, 35 new unit tests)  
+**Last updated:** 2026-04-21 ET (Live plumbing hardening: P0.1–P0.3 reconcile/reconnect, P1.4 broker-truthful close, P2.6 naked-position invariant, P2.7 heartbeat extension, P3.9 flatten.py, P3.10 stop --flatten; 25 new regression tests — see journal/2026-04-21_live_plumbing_hardening.md)  
 **Author:** Cascade + Claude Opus 4.6 + Claude Sonnet 4.6 (AI pair programmers)
 
 ---

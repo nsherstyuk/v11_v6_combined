@@ -25,13 +25,18 @@ class LiveMarketContext(MarketContext):
                  on_tick_callback: Optional[Callable[[Tick], None]] = None,
                  price_decimals: int = 2,
                  state_dir: Optional[str] = None,
-                 logger: Optional[logging.Logger] = None):
+                 logger: Optional[logging.Logger] = None,
+                 force_disconnect_callback: Optional[Callable[[str], None]] = None):
         self.ib = ib
         self.contract = contract
         self.tick_buffer_minutes = tick_buffer_minutes
         self.on_tick_callback = on_tick_callback
         self._d = price_decimals
         self.logger = logger or logging.getLogger(__name__)
+        # 2026-04-23: reliable half-open-socket recovery. See ibkr_executor
+        # for the rationale. When None, we fall back to raw ib.disconnect()
+        # which is NOT guaranteed to trigger a reconnect.
+        self._force_disconnect = force_disconnect_callback
 
         # Rolling tick buffer for velocity calculation
         self.tick_buffer: deque = deque(maxlen=100000)
@@ -394,12 +399,18 @@ class LiveMarketContext(MarketContext):
             err_str = str(e).lower()
             if "not connected" in err_str or "connection" in err_str or "timeout" in err_str:
                 self.logger.error(
-                    "Connectivity-class error on historical fetch — "
-                    "forcing ib.disconnect() to trigger reconnect cycle")
-                try:
-                    self.ib.disconnect()
-                except Exception:
-                    pass
+                    "Connectivity-class error on historical fetch — forcing reconnect")
+                if self._force_disconnect is not None:
+                    try:
+                        self._force_disconnect("historical_fetch_not_connected")
+                    except Exception as cb_err:
+                        self.logger.warning(
+                            f"force_disconnect callback raised: {cb_err}")
+                else:
+                    try:
+                        self.ib.disconnect()
+                    except Exception:
+                        pass
             return None
 
     def calculate_daily_range(self, start_hour: int,

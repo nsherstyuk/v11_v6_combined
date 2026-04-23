@@ -50,6 +50,11 @@ class IBKRConnection:
         self._connected = False
         self._last_heartbeat = 0.0
         self._first_disconnect_time: Optional[float] = None  # epoch, None when connected
+        # Duration (seconds) of the most recent outage, captured at the moment
+        # of successful reconnect. Zero means no completed outage yet. The
+        # reconcile path reads this to decide graduated recovery (re-arm vs
+        # flatten) for orphan positions (P0.3, 2026-04-21).
+        self._last_outage_s: float = 0.0
 
         # Per-instrument state
         self._contracts = {}        # pair_name -> Contract
@@ -110,7 +115,11 @@ class IBKRConnection:
                 except Exception:
                     self._connected = False
             if self._connected:
-                # Clear disconnect timer on successful connection
+                # Clear disconnect timer on successful connection; capture
+                # the outage duration first so reconcile can use it.
+                if self._first_disconnect_time is not None:
+                    self._last_outage_s = (
+                        time.time() - self._first_disconnect_time)
                 self._first_disconnect_time = None
                 return True
 
@@ -150,7 +159,51 @@ class IBKRConnection:
                         self.log.info(f"Restarted stream for {pair_name}")
                 except Exception as e:
                     self.log.error(f"Restart stream {pair_name} failed: {e}")
+            # Reconnect succeeded — capture outage duration and clear timer
+            # so the reconcile path (called next from run_live) can read it.
+            if self._first_disconnect_time is not None:
+                self._last_outage_s = time.time() - self._first_disconnect_time
+                self._first_disconnect_time = None
         return ok
+
+    def force_disconnect(self, reason: str = "half_open_socket") -> None:
+        """Force the connection into a disconnected state so the next
+        ensure_connected() call will trigger a reconnect cycle.
+
+        Why this exists (2026-04-23 incident):
+          Callers sometimes detect a half-open socket by catching a
+          "Not connected" exception on a placeOrder / reqHistoricalData.
+          Calling raw ib.disconnect() in that state does not always fire
+          disconnectedEvent — ib_insync silently no-ops if its internal
+          state is already inconsistent. Result: _connected stays True,
+          ensure_connected() returns True, and the main loop never
+          reconnects. V11 spams "Not connected" placement errors for
+          hours until operator intervention.
+
+        This method does three things that together are reliable:
+          1. Set self._connected = False (bypasses the stale internal flag).
+          2. Start the disconnect timer if not already running (so
+             persistent_failure and outage_s work).
+          3. Call ib.disconnect() best-effort (may or may not fire
+             disconnectedEvent; we do not depend on it).
+        """
+        self._connected = False
+        if self._first_disconnect_time is None:
+            self._first_disconnect_time = time.time()
+        try:
+            if self.ib is not None:
+                self.ib.disconnect()
+        except Exception:
+            pass
+        self.log.warning(
+            f"IBKR force-disconnected ({reason}) — reconnect on next tick")
+
+    @property
+    def last_outage_s(self) -> float:
+        """Duration (seconds) of the most recent outage that just ended,
+        or 0.0 if no outage has been reconciled yet. Read once per reconnect
+        by the reconcile path to drive graduated recovery decisions."""
+        return self._last_outage_s
 
     def qualify_contract(self, inst: InstrumentConfig):
         """Qualify and register an IBKR contract for an instrument."""
