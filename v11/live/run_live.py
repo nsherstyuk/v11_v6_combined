@@ -772,11 +772,35 @@ class V11LiveTrader:
                 if sell_id in missing:
                     exec_.sell_entry_id = 0
 
+    def _is_market_closed_window(self, now_utc: datetime) -> bool:
+        """True during the weekly FX/XAU market closure.
+
+        Forex / gold spot close ~Fri 21:00 UTC and reopen ~Sun 22:00 UTC.
+        During this window no ticks flow by design — if the staleness
+        watchdog kept running it would trip `price_feed_dead` every
+        10 min, emergency-shutdown + wrapper-restart ~270 times across
+        a weekend. Skip escalation during this window; regular operation
+        resumes automatically when ticks flow again at the Sunday open.
+        """
+        wd = now_utc.weekday()  # Mon=0 ... Sun=6
+        hour = now_utc.hour
+        if wd == 4 and hour >= 21:   # Fri 21:00 UTC onward
+            return True
+        if wd == 5:                  # All of Sat
+            return True
+        if wd == 6 and hour < 22:    # Sun before 22:00 UTC
+            return True
+        return False
+
     def _check_price_staleness(self) -> None:
         """Check for stale price feeds and log warnings/errors.
 
         Escalation: 60s warn → 300s restart stream → 600s emergency shutdown.
+        Skipped during the weekly market-close window (Fri 21:00 UTC →
+        Sun 22:00 UTC) since no ticks are expected.
         """
+        if self._is_market_closed_window(datetime.now(timezone.utc)):
+            return
         now = time.time()
         for pair in self._active_pairs:
             last = self._last_price_time.get(pair)
