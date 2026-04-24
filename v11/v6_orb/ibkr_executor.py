@@ -135,10 +135,17 @@ class IBKRExecutionEngine(ExecutionEngine):
         # and silently Cancels the order. DAY matches what the preset
         # forces anyway. The order expires naturally at EOD; V11's
         # max_pending_hours check cancels earlier if no trigger.
+        # triggerMethod=7 ("last or double bid/ask"): IBKR paper XAUUSD
+        # streams bid/ask only — zero `last` trades print. The default
+        # triggerMethod waits on `last`, so stops never trigger even when
+        # bid/ask is $20+ past the stop. Method 7 falls back to bid/ask
+        # when last is absent and uses last when present; safe on both
+        # paper and live. (2026-04-24 incident: BUY-STOP @ 4711.24 sat
+        # resting while price traded to 4735.82 mid for ~20 min.)
         buy_entry = Order(
             action="BUY", orderType="STP", totalQuantity=self.quantity,
             auxPrice=round(range_info.high, d),
-            tif="DAY",
+            tif="DAY", triggerMethod=7,
             ocaGroup=oca_group, ocaType=1,
             transmit=False,
         )
@@ -146,7 +153,7 @@ class IBKRExecutionEngine(ExecutionEngine):
         sell_entry = Order(
             action="SELL", orderType="STP", totalQuantity=self.quantity,
             auxPrice=round(range_info.low, d),
-            tif="DAY",
+            tif="DAY", triggerMethod=7,
             ocaGroup=oca_group, ocaType=1,
             transmit=True,
         )
@@ -484,7 +491,7 @@ class IBKRExecutionEngine(ExecutionEngine):
 
         sl_order = Order(
             action=sl_action, orderType="STP", totalQuantity=self.quantity,
-            auxPrice=sl_price, tif="GTC",
+            auxPrice=sl_price, tif="GTC", triggerMethod=7,
             ocaGroup=oca_exit, ocaType=1, transmit=False)
 
         tp_order = Order(

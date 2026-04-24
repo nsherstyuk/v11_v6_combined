@@ -104,6 +104,71 @@ def test_orders_use_tif_day_not_gtd():
             "goodTillDate must be empty when TIF=DAY"
 
 
+# ── Fix 1b: STP orders use triggerMethod=7 (2026-04-24 incident) ───────────
+
+
+def test_entry_stops_use_trigger_method_7():
+    """Regression for 2026-04-24: IBKR paper XAUUSD streams bid/ask only
+    (zero `last` prints). Default triggerMethod=0 waits on `last` and
+    never fires. Method 7 ('last or double-bid/ask') falls back to
+    bid/ask when last is absent, which is the only way STP entries
+    fire on paper XAU."""
+    ib = _mock_ib()
+    placed_orders = []
+    def _placeOrder(contract, order):
+        placed_orders.append(order)
+        trade = MagicMock()
+        trade.order = MagicMock()
+        trade.order.orderId = len(placed_orders) + 100
+        return trade
+    ib.placeOrder.side_effect = _placeOrder
+
+    ex = IBKRExecutionEngine(
+        ib=ib, contract=_mock_contract(), quantity=1,
+        on_fill_callback=lambda f: None,
+        trade_end_hour=16, price_decimals=2, dry_run=False, logger=log,
+    )
+    ok = ex.set_orb_brackets(_range(), rr_ratio=2.5)
+    assert ok is True
+    assert len(placed_orders) == 2
+    for o in placed_orders:
+        assert o.orderType == "STP"
+        assert o.triggerMethod == 7, (
+            f"STP entry order must set triggerMethod=7 (got "
+            f"{o.triggerMethod}); on paper XAUUSD, default method waits "
+            f"on `last` which never prints, so the stop never fires.")
+
+
+def test_sl_order_uses_trigger_method_7():
+    """Same root cause as entry stops: SL is a STP order, and on paper
+    XAUUSD with no `last` prints, default triggerMethod would let the
+    SL sit unexecuted even as price trades through it."""
+    ib = _mock_ib()
+    placed_orders = []
+    def _placeOrder(contract, order):
+        placed_orders.append(order)
+        trade = MagicMock()
+        trade.order = MagicMock()
+        trade.order.orderId = len(placed_orders) + 200
+        return trade
+    ib.placeOrder.side_effect = _placeOrder
+
+    ex = IBKRExecutionEngine(
+        ib=ib, contract=_mock_contract(), quantity=1,
+        on_fill_callback=lambda f: None,
+        trade_end_hour=16, price_decimals=2, dry_run=False, logger=log,
+    )
+    ex._range_info = _range()
+    ex._rr_ratio = 2.5
+    ex._place_sl_tp("LONG", entry_price=2660.0)
+
+    stp_orders = [o for o in placed_orders if o.orderType == "STP"]
+    assert len(stp_orders) == 1, "expected one SL (STP) order"
+    sl = stp_orders[0]
+    assert sl.triggerMethod == 7, (
+        f"SL STP order must set triggerMethod=7 (got {sl.triggerMethod})")
+
+
 # ── Fix 2: orderStatusEvent listener detects silent Cancels ────────────────
 
 
