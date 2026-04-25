@@ -792,14 +792,16 @@ class V11LiveTrader:
             return True
         return False
 
-    def _check_price_staleness(self) -> None:
+    def _check_price_staleness(self, now_utc: datetime | None = None) -> None:
         """Check for stale price feeds and log warnings/errors.
 
         Escalation: 60s warn → 300s restart stream → 600s emergency shutdown.
         Skipped during the weekly market-close window (Fri 21:00 UTC →
         Sun 22:00 UTC) since no ticks are expected.
+
+        now_utc: injectable for deterministic testing; defaults to UTC now.
         """
-        if self._is_market_closed_window(datetime.now(timezone.utc)):
+        if self._is_market_closed_window(now_utc or datetime.now(timezone.utc)):
             return
         now = time.time()
         for pair in self._active_pairs:

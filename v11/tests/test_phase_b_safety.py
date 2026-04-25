@@ -281,19 +281,23 @@ class TestPriceStaleness:
 
         return trader
 
+    # Deterministic market-open timestamp used by all escalation tests so
+    # they pass regardless of the actual weekday/hour this suite is run.
+    _MARKET_OPEN = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)  # Tue noon
+
     def test_staleness_warns_at_60s(self, log, mock_conn, tmp_path):
         trader = self._make_trader(log, mock_conn, tmp_path)
         trader._last_price_time["XAUUSD"] = time.time() - 90  # 90s stale
 
         # Should warn but not restart or shutdown
-        trader._check_price_staleness()
+        trader._check_price_staleness(now_utc=self._MARKET_OPEN)
         mock_conn.restart_price_stream.assert_not_called()
 
     def test_staleness_restarts_stream_at_300s(self, log, mock_conn, tmp_path):
         trader = self._make_trader(log, mock_conn, tmp_path)
         trader._last_price_time["XAUUSD"] = time.time() - 310  # 310s stale
 
-        trader._check_price_staleness()
+        trader._check_price_staleness(now_utc=self._MARKET_OPEN)
         mock_conn.restart_price_stream.assert_called_once_with("XAUUSD")
 
     def test_staleness_emergency_shutdown_at_600s(self, log, mock_conn, tmp_path):
@@ -301,21 +305,32 @@ class TestPriceStaleness:
         trader._last_price_time["XAUUSD"] = time.time() - 610  # 610s stale
 
         with patch.object(trader, '_emergency_shutdown') as mock_emergency:
-            trader._check_price_staleness()
+            trader._check_price_staleness(now_utc=self._MARKET_OPEN)
             mock_emergency.assert_called_once_with("price_feed_dead")
 
     def test_staleness_no_warning_when_prices_fresh(self, log, mock_conn, tmp_path):
         trader = self._make_trader(log, mock_conn, tmp_path)
         trader._last_price_time["XAUUSD"] = time.time() - 5  # 5s ago
 
-        trader._check_price_staleness()
+        trader._check_price_staleness(now_utc=self._MARKET_OPEN)
         mock_conn.restart_price_stream.assert_not_called()
 
     def test_staleness_warns_when_never_received_price(self, log, mock_conn, tmp_path):
         trader = self._make_trader(log, mock_conn, tmp_path)
         # No entry in _last_price_time for XAUUSD
-        trader._check_price_staleness()
+        trader._check_price_staleness(now_utc=self._MARKET_OPEN)
         # Should not crash, just warn
+
+    def test_staleness_skipped_during_closed_window(self, log, mock_conn, tmp_path):
+        """During the weekly close, even a 1000s gap must not escalate."""
+        trader = self._make_trader(log, mock_conn, tmp_path)
+        trader._last_price_time["XAUUSD"] = time.time() - 1000
+        saturday = datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
+
+        with patch.object(trader, '_emergency_shutdown') as mock_emergency:
+            trader._check_price_staleness(now_utc=saturday)
+            mock_emergency.assert_not_called()
+        mock_conn.restart_price_stream.assert_not_called()
 
 
 # ── 8: Heartbeat file ──────────────────────────────────────────────────────
