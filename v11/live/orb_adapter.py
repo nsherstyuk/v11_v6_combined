@@ -258,7 +258,7 @@ class ORBAdapter:
                         f"outside range "
                         f"[{r.low:.{self._v6_config.price_decimals}f}-"
                         f"{r.high:.{self._v6_config.price_decimals}f}], "
-                        f"skipping (velocity never reached)")
+                        f"skipping (price already outside range at eval time)")
                     self._strategy.state = StrategyState.DONE_TODAY
                     return
 
