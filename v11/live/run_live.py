@@ -946,7 +946,7 @@ class V11LiveTrader:
                 self.log.error(
                     f"reconcile_after_reconnect raised for {pair}: {e}")
                 outcome = "error"
-            self.log.info(f"reconcile[{pair}] → {outcome}")
+            self.log.info(f"reconcile[{pair}] -> {outcome}")
             if pair:
                 orb_pairs_handled.add(pair)
 
