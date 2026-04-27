@@ -424,3 +424,75 @@ def test_strategy_does_not_fall_back_when_no_failure():
 
     assert strategy.state == StrategyState.ORDERS_PLACED
     assert exec_._cancelled_count == 0
+
+
+# ── max_pending_hours anchored to trade-window open ────────────────────────
+
+
+def test_max_pending_hours_anchored_to_window_open_not_placement():
+    """Brackets placed at 06:57 (before 08:00 window open) must NOT be
+    cancelled at 10:57 (placement+4h). Timer is anchored to window open,
+    so cancel should fire at 12:00 (window_open+4h).
+
+    Regression: 2026-04-27 lost a trade window because brackets placed
+    at 06:57 were cancelled at 10:57 — burning ~3h of pre-window time
+    against a 4h budget."""
+    cfg = _config()  # trade_start_hour=8, max_pending_hours=4 default
+    strategy = ORBStrategy(cfg, logger=log)
+    strategy.range = _range()
+    strategy.state = StrategyState.ORDERS_PLACED
+    strategy.orders_placed_time = datetime(2026, 4, 27, 6, 57, tzinfo=timezone.utc)
+
+    ctx = _FakeContext(strategy.range)
+    exec_ = _FakeExec()
+
+    # At 10:57 (placement+4h, but only window_open+2:57): must NOT cancel
+    tick = Tick(
+        timestamp=datetime(2026, 4, 27, 10, 57, tzinfo=timezone.utc),
+        bid=2655.0, ask=2655.1,
+    )
+    strategy.on_tick(tick, ctx, exec_)
+    assert strategy.state == StrategyState.ORDERS_PLACED, \
+        "Should not cancel at placement+4h when window open is later"
+    assert exec_._cancelled_count == 0
+
+    # At 12:00 (window_open+4h exactly): must cancel
+    tick2 = Tick(
+        timestamp=datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc),
+        bid=2655.0, ask=2655.1,
+    )
+    strategy.on_tick(tick2, ctx, exec_)
+    assert strategy.state == StrategyState.DONE_TODAY
+    assert exec_._cancelled_count == 1
+
+
+def test_max_pending_hours_uses_placement_time_when_placed_after_window_open():
+    """If brackets are placed AFTER window open (e.g. delayed start),
+    the timer should run from placement, not window open — preserving
+    a full max_pending_hours budget."""
+    cfg = _config()  # trade_start_hour=8, max_pending_hours=4
+    strategy = ORBStrategy(cfg, logger=log)
+    strategy.range = _range()
+    strategy.state = StrategyState.ORDERS_PLACED
+    # Placed at 10:00 (2h after window open)
+    strategy.orders_placed_time = datetime(2026, 4, 27, 10, 0, tzinfo=timezone.utc)
+
+    ctx = _FakeContext(strategy.range)
+    exec_ = _FakeExec()
+
+    # At 13:30 (placement+3:30, window_open+5:30): should NOT cancel
+    tick = Tick(
+        timestamp=datetime(2026, 4, 27, 13, 30, tzinfo=timezone.utc),
+        bid=2655.0, ask=2655.1,
+    )
+    strategy.on_tick(tick, ctx, exec_)
+    assert strategy.state == StrategyState.ORDERS_PLACED, \
+        "Timer must measure from placement when placement > window open"
+
+    # At 14:00 (placement+4h): cancel
+    tick2 = Tick(
+        timestamp=datetime(2026, 4, 27, 14, 0, tzinfo=timezone.utc),
+        bid=2655.0, ask=2655.1,
+    )
+    strategy.on_tick(tick2, ctx, exec_)
+    assert strategy.state == StrategyState.DONE_TODAY

@@ -178,14 +178,23 @@ class ORBStrategy:
             self.state = StrategyState.RANGE_READY
             return
 
-        # Max pending hours: cancel if entries rest too long
+        # Max pending hours: cancel if entries rest too long.
+        # Anchor the timer to trade-window open, not placement time —
+        # brackets are placed right after range calc (e.g. 06:57 UTC) but
+        # the trade window doesn't open until cfg.trade_start_hour, so
+        # measuring from placement burns budget while the window is closed.
         if (self.state == StrategyState.ORDERS_PLACED
                 and cfg.max_pending_hours > 0
                 and self.orders_placed_time):
-            elapsed_h = (tick.timestamp - self.orders_placed_time).total_seconds() / 3600
+            window_open = tick.timestamp.replace(
+                hour=cfg.trade_start_hour, minute=0, second=0, microsecond=0)
+            effective_start = max(self.orders_placed_time, window_open)
+            elapsed_h = (tick.timestamp - effective_start).total_seconds() / 3600
             if elapsed_h >= cfg.max_pending_hours:
                 self.logger.warning(
-                    f"Orders pending > {cfg.max_pending_hours}h, cancelling")
+                    f"Orders pending > {cfg.max_pending_hours}h "
+                    f"(since window open {cfg.trade_start_hour:02d}:00 UTC), "
+                    f"cancelling")
                 execution.cancel_orb_brackets()
                 self.state = StrategyState.DONE_TODAY
                 return
