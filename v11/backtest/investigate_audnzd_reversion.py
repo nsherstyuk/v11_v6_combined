@@ -50,9 +50,11 @@ def build_nights(df: pd.DataFrame) -> pd.DataFrame:
     first_half = df[(h >= 22) | (h < 2)].copy()
     second_half = df[(h >= 2) & (h < 6)].copy()
 
-    # Anchor each bar to the night's start date (the 22:00 anchor day)
-    first_half["night"] = (first_half["timestamp"] - pd.Timedelta(hours=2)).dt.date
-    second_half["night"] = (second_half["timestamp"] - pd.Timedelta(hours=2)).dt.date
+    # Anchor each bar to the night's start date (the 22:00 anchor day).
+    # Offset must be >= 6h so the second-half bars (02:00-05:59 of D+1) tag
+    # back to D, matching first-half bars from 22:00 D - 01:59 D+1.
+    first_half["night"] = (first_half["timestamp"] - pd.Timedelta(hours=6)).dt.date
+    second_half["night"] = (second_half["timestamp"] - pd.Timedelta(hours=6)).dt.date
 
     g1 = first_half.groupby("night")
     g2 = second_half.groupby("night")

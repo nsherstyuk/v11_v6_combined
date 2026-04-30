@@ -1,0 +1,55 @@
+Loading bars from C:\nautilus0\data\1m_csv_fresh\audnzd_1m_tick.csv ...
+  3,016,214 bars indexed
+Loading trades from C:\ibkr_grok-_wing_agent\v11\backtest\audnzd_eda_output\phase2_trades.csv ...
+  922 trades
+
+Computing MAE/MFE per trade ...
+  median bars_in_trade = 0
+  max bars_in_trade    = 0
+
+MAE / MFE distribution (pips):
+  MAE    mean=0.0  p50=    0.0  p75=    0.0  p90=    0.0  p95=    0.0  p99=    0.0  p100=    0.0
+  MFE    mean=0.0  p50=    0.0  p75=    0.0  p90=    0.0  p95=    0.0  p99=    0.0  p100=    0.0
+
+MAE among CLOSE-TO-CLOSE LOSERS (n=275):
+  MAE    mean=0.0  p50=    0.0  p75=    0.0  p90=    0.0  p95=    0.0  p99=    0.0  p100=    0.0
+MAE among CLOSE-TO-CLOSE WINNERS (n=647):
+  MAE    mean=0.0  p50=    0.0  p75=    0.0  p90=    0.0  p95=    0.0  p99=    0.0  p100=    0.0
+
+Stop-loss sweep
+====================================================================================================
+         NO STOP   n= 922   stopped=  0   WR= 70.2%   AvgR=+14.87p   PF= 3.73   MaxDD=  -188.8p   Total=+13709.4p
+        stop=10p   n= 922   stopped=  0   WR= 70.2%   AvgR=+14.87p   PF= 3.73   MaxDD=  -188.8p   Total=+13709.4p
+        stop=15p   n= 922   stopped=  0   WR= 70.2%   AvgR=+14.87p   PF= 3.73   MaxDD=  -188.8p   Total=+13709.4p
+        stop=20p   n= 922   stopped=  0   WR= 70.2%   AvgR=+14.87p   PF= 3.73   MaxDD=  -188.8p   Total=+13709.4p
+        stop=30p   n= 922   stopped=  0   WR= 70.2%   AvgR=+14.87p   PF= 3.73   MaxDD=  -188.8p   Total=+13709.4p
+        stop=50p   n= 922   stopped=  0   WR= 70.2%   AvgR=+14.87p   PF= 3.73   MaxDD=  -188.8p   Total=+13709.4p
+        stop=75p   n= 922   stopped=  0   WR= 70.2%   AvgR=+14.87p   PF= 3.73   MaxDD=  -188.8p   Total=+13709.4p
+       stop=100p   n= 922   stopped=  0   WR= 70.2%   AvgR=+14.87p   PF= 3.73   MaxDD=  -188.8p   Total=+13709.4p
+       stop=150p   n= 922   stopped=  0   WR= 70.2%   AvgR=+14.87p   PF= 3.73   MaxDD=  -188.8p   Total=+13709.4p
+
+Stop-loss sweep, OOS only (entry < 2024)
+====================================================================================================
+     OOS NO STOP   n= 673   stopped=  0   WR= 70.4%   AvgR=+14.89p   PF= 3.54   MaxDD=  -188.8p   Total=+10022.3p
+    OOS stop=10p   n= 673   stopped=  0   WR= 70.4%   AvgR=+14.89p   PF= 3.54   MaxDD=  -188.8p   Total=+10022.3p
+    OOS stop=15p   n= 673   stopped=  0   WR= 70.4%   AvgR=+14.89p   PF= 3.54   MaxDD=  -188.8p   Total=+10022.3p
+    OOS stop=20p   n= 673   stopped=  0   WR= 70.4%   AvgR=+14.89p   PF= 3.54   MaxDD=  -188.8p   Total=+10022.3p
+    OOS stop=30p   n= 673   stopped=  0   WR= 70.4%   AvgR=+14.89p   PF= 3.54   MaxDD=  -188.8p   Total=+10022.3p
+    OOS stop=50p   n= 673   stopped=  0   WR= 70.4%   AvgR=+14.89p   PF= 3.54   MaxDD=  -188.8p   Total=+10022.3p
+    OOS stop=75p   n= 673   stopped=  0   WR= 70.4%   AvgR=+14.89p   PF= 3.54   MaxDD=  -188.8p   Total=+10022.3p
+   OOS stop=100p   n= 673   stopped=  0   WR= 70.4%   AvgR=+14.89p   PF= 3.54   MaxDD=  -188.8p   Total=+10022.3p
+   OOS stop=150p   n= 673   stopped=  0   WR= 70.4%   AvgR=+14.89p   PF= 3.54   MaxDD=  -188.8p   Total=+10022.3p
+
+Stop-loss sweep, IS only (entry >= 2024)
+====================================================================================================
+      IS NO STOP   n= 249   stopped=  0   WR= 69.5%   AvgR=+14.81p   PF= 4.41   MaxDD=   -68.3p   Total= +3687.1p
+     IS stop=10p   n= 249   stopped=  0   WR= 69.5%   AvgR=+14.81p   PF= 4.41   MaxDD=   -68.3p   Total= +3687.1p
+     IS stop=15p   n= 249   stopped=  0   WR= 69.5%   AvgR=+14.81p   PF= 4.41   MaxDD=   -68.3p   Total= +3687.1p
+     IS stop=20p   n= 249   stopped=  0   WR= 69.5%   AvgR=+14.81p   PF= 4.41   MaxDD=   -68.3p   Total= +3687.1p
+     IS stop=30p   n= 249   stopped=  0   WR= 69.5%   AvgR=+14.81p   PF= 4.41   MaxDD=   -68.3p   Total= +3687.1p
+     IS stop=50p   n= 249   stopped=  0   WR= 69.5%   AvgR=+14.81p   PF= 4.41   MaxDD=   -68.3p   Total= +3687.1p
+     IS stop=75p   n= 249   stopped=  0   WR= 69.5%   AvgR=+14.81p   PF= 4.41   MaxDD=   -68.3p   Total= +3687.1p
+    IS stop=100p   n= 249   stopped=  0   WR= 69.5%   AvgR=+14.81p   PF= 4.41   MaxDD=   -68.3p   Total= +3687.1p
+    IS stop=150p   n= 249   stopped=  0   WR= 69.5%   AvgR=+14.81p   PF= 4.41   MaxDD=   -68.3p   Total= +3687.1p
+
+Wrote C:\ibkr_grok-_wing_agent\v11\backtest\audnzd_eda_output\phase3_mae_mfe.csv

@@ -1,0 +1,54 @@
+Loading C:\nautilus0\data\1m_csv_fresh\audnzd_1m_tick.csv ...
+  3,016,214 bars, 2018-01-01 22:00:00+00:00 to 2026-04-29 10:59:00+00:00
+  2105 nights with sufficient coverage
+
+1. Correlation test (n=2105)
+   Pearson(dev_02, move_06) = +0.0104
+   (negative = reversion. Need < -0.10 for tradeable, < -0.20 strong)
+
+2. Conditional means
+   When dev_02 > 0 (price above mid):  n=1074   mean(move_06) = +0.32 pips
+   When dev_02 < 0 (price below mid):  n=1030   mean(move_06) = +0.16 pips
+   (above-mid should be NEGATIVE, below-mid POSITIVE if reversion)
+
+3. Hit rate
+   % of nights price moved toward midpoint: 49.0%
+   (need > 55% to be tradeable after cost; > 50% is just noise)
+
+4. Reversion stratified by stretch magnitude
+             n  mean_move_pips  mean_revert_pips  hit_rate
+dev_bin                                                   
+0-5      931.0            0.45             -0.03     50.27
+5-10     692.0           -0.70              0.20     47.98
+10-15    297.0            0.55             -0.91     48.15
+15-20    108.0            1.69             -0.06     48.15
+20-30     59.0            3.08             -0.32     47.46
+30-50     15.0            1.75              1.68     53.33
+50+        2.0           10.70            -10.70      0.00
+   mean_revert_pips = expected pips of reversion (positive = good)
+   For tradability: mean_revert_pips > 4 (round-trip spread)
+
+5. Year-by-year
+          n   corr  hit_rate  mean_revert_pips
+year                                          
+2018  244.0 -0.075    50.820             1.058
+2019  260.0  0.118    48.846            -0.798
+2020  246.0 -0.052    46.748             0.123
+2021  260.0 -0.041    55.385             1.340
+2022  259.0 -0.034    46.718            -0.487
+2023  248.0  0.012    47.177             0.046
+2024  255.0  0.001    50.196            -0.803
+2025  249.0  0.042    49.398            -0.378
+2026   84.0  0.160    38.095            -2.379
+
+6. After 4-pip round-trip cost
+   % of nights net-profitable: 35.4%
+   Mean net result per night:  -4.09 pips
+
+7. Verdict
+   Pass criteria (all required):
+     [FAIL]  corr < -0.10                  (got +0.0104)
+     [FAIL]  hit_rate > 55%                (got 49.0%)
+     [FAIL]  mean_net > 0 after cost       (got -4.09 pips)
+
+Wrote C:\ibkr_grok-_wing_agent\v11\backtest\audnzd_eda_output\reversion_nights.csv

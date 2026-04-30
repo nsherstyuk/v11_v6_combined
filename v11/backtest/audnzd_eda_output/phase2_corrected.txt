@@ -1,0 +1,33 @@
+Loading C:\nautilus0\data\1m_csv_fresh\audnzd_1m_tick.csv ...
+  3,016,214 bars, 2018-01-01 22:00:00+00:00 to 2026-04-29 10:59:00+00:00
+
+  2105 candidate nights, 1173 trades after >=5-pip threshold (55.7% participation)
+
+Results (Phase 2 baseline, no filters)
+============================================================
+  ALL       n=1173   WR= 35.4%   AvgR= -4.36 pips   PF= 0.46   MaxDD=-5119.5 pips   Total= -5116.8 pips   MedSpread=4.11 pips
+  OOS       n= 852   WR= 35.9%   AvgR= -3.97 pips   PF= 0.50   MaxDD=-3385.6 pips   Total= -3382.9 pips   MedSpread=4.11 pips
+  IS        n= 321   WR= 34.0%   AvgR= -5.40 pips   PF= 0.34   MaxDD=-1708.2 pips   Total= -1733.9 pips   MedSpread=4.11 pips
+
+By year
+============================================================
+  2018      n= 144   WR= 40.3%   AvgR= -2.52 pips   PF= 0.66   MaxDD= -365.1 pips   Total=  -362.4 pips   MedSpread=4.25 pips
+  2019      n= 143   WR= 30.8%   AvgR= -5.72 pips   PF= 0.34   MaxDD= -809.6 pips   Total=  -818.2 pips   MedSpread=3.77 pips
+  2020      n= 147   WR= 36.7%   AvgR= -4.07 pips   PF= 0.47   MaxDD= -599.0 pips   Total=  -598.0 pips   MedSpread=3.71 pips
+  2021      n= 128   WR= 33.6%   AvgR= -2.68 pips   PF= 0.57   MaxDD= -374.5 pips   Total=  -343.1 pips   MedSpread=3.63 pips
+  2022      n= 148   WR= 37.8%   AvgR= -4.68 pips   PF= 0.47   MaxDD= -685.7 pips   Total=  -693.0 pips   MedSpread=5.01 pips
+  2023      n= 142   WR= 35.9%   AvgR= -4.00 pips   PF= 0.56   MaxDD= -574.3 pips   Total=  -568.2 pips   MedSpread=4.34 pips
+  2024      n= 141   WR= 35.5%   AvgR= -4.48 pips   PF= 0.34   MaxDD= -610.1 pips   Total=  -631.4 pips   MedSpread=3.78 pips
+  2025      n= 123   WR= 32.5%   AvgR= -5.55 pips   PF= 0.35   MaxDD= -671.7 pips   Total=  -682.3 pips   MedSpread=4.45 pips
+  2026      n=  57   WR= 33.3%   AvgR= -7.37 pips   PF= 0.34   MaxDD= -399.5 pips   Total=  -420.2 pips   MedSpread=4.07 pips
+
+By side
+============================================================
+  BUY       n= 567   WR= 35.4%   AvgR= -4.27 pips   PF= 0.47   MaxDD=-2415.3 pips   Total= -2419.0 pips   MedSpread=4.10 pips
+  SELL      n= 606   WR= 35.3%   AvgR= -4.45 pips   PF= 0.45   MaxDD=-2798.3 pips   Total= -2697.9 pips   MedSpread=4.11 pips
+
+Gate check (Phase 3 only if both):
+  OOS AvgR > 0      : FAIL (-3.97)
+  OOS PF   > 1.30   : FAIL (0.50)
+
+Wrote C:\ibkr_grok-_wing_agent\v11\backtest\audnzd_eda_output\phase2_trades.csv
