@@ -580,8 +580,11 @@ class V11LiveTrader:
                         else:
                             proximity = " | brackets eligible"
                 elif state == 'DONE_TODAY':
-                    if llm_done:
-                        proximity = " | LLM rejected today"
+                    skip_reason = s.get('skip_reason')
+                    if skip_reason:
+                        proximity = f" | done: {skip_reason}"
+                    elif llm_done:
+                        proximity = " | done (post-window)"
                     else:
                         proximity = f" | done (window closes {trade_end}:00 UTC)"
                 elif state in ('ORDERS_PLACED', 'IN_TRADE'):

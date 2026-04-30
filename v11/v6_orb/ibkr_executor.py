@@ -61,9 +61,13 @@ class IBKRExecutionEngine(ExecutionEngine):
 
         # 2026-04-23: track consecutive connectivity-class placement
         # failures so the main loop can exit (→ wrapper restart) if the
-        # reconnect path cannot recover. Threshold ~30s of 2s-poll spam.
+        # reconnect path cannot recover.
+        # 2026-04-30: threshold raised 15 → 30 (~15 min at 31s/strike) so
+        # IBKR Gateway's daily auto-restart window does not trip the
+        # tripwire. Earlier value killed the process every morning at 04:08
+        # ET right when the trade window opened, causing 0 trades for weeks.
         self._consec_placement_conn_failures: int = 0
-        self._placement_stuck_threshold: int = 15
+        self._placement_stuck_threshold: int = 30
 
         # Order tracking (IDs for state persistence)
         self.buy_entry_id: int = 0

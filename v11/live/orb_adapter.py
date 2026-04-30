@@ -123,6 +123,11 @@ class ORBAdapter:
         self._llm_gate_pending: bool = False
         self._llm_gate_time: Optional[datetime] = None
 
+        # 2026-04-30: track *why* state went to DONE_TODAY so the status
+        # line reflects the actual cause (window closed, stale breakout,
+        # LLM rejection, etc.) instead of always reading "LLM rejected".
+        self._skip_reason: Optional[str] = None
+
         # ── Slow ATR for regime context ────────────────────────────
         self._slow_atr: float = 0.0
         self._slow_atr_count: int = 0
@@ -199,6 +204,7 @@ class ORBAdapter:
                 and self._strategy.state in (
                     StrategyState.IDLE, StrategyState.RANGE_READY)):
             self._strategy.state = StrategyState.DONE_TODAY
+            self._skip_reason = f"trade window closed at {cfg.trade_end_hour}:00 UTC, no breakout"
             return
 
         # ── Daily orchestration: Asian range ──────────────────────
@@ -260,6 +266,9 @@ class ORBAdapter:
                         f"{r.high:.{self._v6_config.price_decimals}f}], "
                         f"skipping (price already outside range at eval time)")
                     self._strategy.state = StrategyState.DONE_TODAY
+                    side = "above high" if mid_price > r.high else "below low"
+                    self._skip_reason = (
+                        f"stale breakout: price already {side} at eval time")
                     return
 
         # ── Drive strategy ────────────────────────────────────────
@@ -303,6 +312,7 @@ class ORBAdapter:
         approved = await self._evaluate_orb_signal(now)
         if not approved:
             self._strategy.state = StrategyState.DONE_TODAY
+            self._skip_reason = "LLM rejected setup"
             self._log.info("ORB state: RANGE_READY -> DONE_TODAY (LLM rejected)")
         else:
             self._log.info("ORB: LLM gate passed — brackets eligible")
@@ -375,6 +385,7 @@ class ORBAdapter:
             "llm_evaluated": self._llm_evaluated_today,
             "llm_gate_pending": self._llm_gate_pending,
             "llm_threshold": self._llm_confidence_threshold,
+            "skip_reason": self._skip_reason,
         }
 
     # ── Fill callback (from V6 execution engine) ──────────────────
@@ -626,6 +637,7 @@ class ORBAdapter:
         self._gap_calculated = False
         self._llm_evaluated_today = False
         self._llm_gate_pending = False
+        self._skip_reason = None
 
         # Cancel lingering orders from previous day
         if self._strategy.state in (
