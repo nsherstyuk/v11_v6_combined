@@ -48,3 +48,13 @@ v11/backtest/*_results.txt
 v11/backtest/output_*.txt
 v11/backtest/research_output.txt
 v11/backtest/intraday_results.txt
+
+# Backtest results/cache directory (LLM response cache + JSON outputs, reproducible)
+v11/backtest/results/
+
+# Misc reference materials downloaded into repo root (not part of source)
+NYMEX_DL_NG1*.csv
+*.pdf
+# One-off LLM transcripts dumped to repo root
+grok-chat.md
+gemini-conversation-*.md
