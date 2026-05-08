@@ -90,13 +90,13 @@ of the 2026-05-01 zero-trades-for-2-weeks incident.
 
 ### Launcher
 
-IBC ships a `gatewaystart.sh` script. Edit it the same way the Windows
+IBC ships a `gatewaystartmacos.sh` script. Edit it the same way the Windows
 `StartGateway.bat` was edited: add a port-listening guard so a manual
 re-launch while Gateway is already up does not produce a double-login
 lockout.
 
 ```bash
-# at top of gatewaystart.sh, after shebang:
+# at top of gatewaystartmacos.sh, after shebang:
 if lsof -nP -iTCP:4001 -sTCP:LISTEN > /dev/null 2>&1; then
     echo "ABORT: port 4001 (live API) already listening — Gateway already up"
     exit 1
@@ -111,7 +111,7 @@ fi
 
 Use `launchd`, not cron. Create
 `~/Library/LaunchAgents/com.ibc.gateway.plist` with `RunAtLoad=true`
-pointing at `~/ibc/gatewaystart.sh`. Standard recipe — defer to IBC's
+pointing at `~/ibc/gatewaystartmacos.sh`. Standard recipe — defer to IBC's
 own macOS docs in their wiki.
 
 ## Phase 5 — Claude Code conversation history + memory
@@ -157,7 +157,7 @@ cd ~/code/ibkr_grok_wing_agent
 source .venv/bin/activate
 
 # 1. start IB Gateway via IBC, log in (paper mode), confirm port 4002 listening:
-~/ibc/gatewaystart.sh
+~/ibc/gatewaystartmacos.sh
 lsof -nP -iTCP:4002 -sTCP:LISTEN   # should show one entry
 
 # 2. run v11 live in paper mode (LLM disabled):
