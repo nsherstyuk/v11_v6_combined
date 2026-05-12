@@ -1,19 +1,38 @@
-# V11 — Darvas Box + Volume Imbalance + LLM Filter
+# V11 — Multi-Strategy Trading System
 
-Hybrid trading system combining deterministic signal generation with intelligent LLM filtering.
+> **2026-05-10 active state:** Single live strategy is **XAUUSD ORB
+> via the V6 adapter** (`v11/v6_orb/`). EURUSD Darvas + 4H Level
+> Retest are **suspended** pending an EURUSD data integrity audit
+> (`eurusd_1m_tick.csv` was modified 2026-04-13 without documented
+> provenance and prior research is invalidated). LLM-as-trade-gate
+> has tested negative twice (anti-selects high-payoff days) and is
+> NOT used as a price-action filter on the active path; LLM may
+> still be evaluated for event/news/anomaly contexts in research.
+>
+> **Source of truth for current state:** the "Current state" section
+> at the top of `docs/PROJECT_STATUS.md`, plus `CLAUDE.md`. The
+> Darvas + LLM material in this README describes the codebase's
+> capability surface, not the active live posture. Do not treat the
+> Quick Start / Key Parameters tables below as the production
+> configuration — they describe the legacy default-on path that has
+> since been narrowed.
 
-## Architecture
+Hybrid trading system combining deterministic signal generation with optional LLM filtering. The codebase supports Darvas + Volume Imbalance + LLM Filter as legacy components and the V6 ORB adapter as the current production strategy.
+
+## Architecture (codebase capability — legacy + current)
 
 ```
-IBKR Live Stream → BarAggregator → RollingBuffer → DarvasDetector
+IBKR Live Stream → BarAggregator → RollingBuffer → DarvasDetector       (legacy, suspended)
     → On breakout: ImbalanceClassifier → LLM Filter (Grok) → TradeManager → IBKR
+
+IBKR Live Stream → V6 ORB adapter → ORB executor → bracket orders → IBKR  (current, active)
 ```
 
 ## Instruments
 
-- **XAUUSD** (Gold)
-- **EURUSD**
-- **USDJPY**
+- **XAUUSD** (Gold) — active via V6 ORB
+- **EURUSD** — suspended pending data audit
+- **USDJPY** — research surface, not active
 
 ## Quick Start
 

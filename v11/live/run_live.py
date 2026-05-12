@@ -414,7 +414,14 @@ class V11LiveTrader:
 
                 # Reconnected
                 if not was_connected and self.conn.connected:
-                    # Just reconnected — reconcile positions
+                    # Just reconnected — re-point ORB engines at the
+                    # fresh ib instance BEFORE reconciling, so the
+                    # reconcile_after_reconnect path queries the live
+                    # socket. IBKRConnection.connect() reassigns
+                    # self.ib = IB() and ORB-owned components otherwise
+                    # keep a handle on the stale, disconnected one
+                    # (Phase 1, 2026-05-11 remediation).
+                    self.runner.rebind_orb_connections()
                     self._reconcile_positions()
 
                 now = datetime.now(timezone.utc)
@@ -1022,6 +1029,22 @@ class V11LiveTrader:
             self.log.info("Cancelled all open orders")
         except Exception as e:
             self.log.error(f"Failed to cancel orders: {e}")
+
+        # ORB-aware emergency close (Phase 3, 2026-05-11 remediation).
+        # cancel_all_orders above wipes SL/TP, so any ORB-side orphan
+        # position is now unprotected. Route through the executor's
+        # broker-truth-aware close_at_market path BEFORE the legacy
+        # TradeManager block below so an ORB orphan gets flattened
+        # before the process exits. Best-effort, runs only if the
+        # connection is live (a stale socket can't close anything).
+        if self.conn.connected:
+            for engine in self.runner.engines:
+                if hasattr(engine, "emergency_close"):
+                    try:
+                        engine.emergency_close(reason)
+                    except Exception as e:
+                        self.log.error(
+                            f"engine.emergency_close failed: {e}")
 
         # Try one final reconnect to close positions
         if not self.conn.connected:

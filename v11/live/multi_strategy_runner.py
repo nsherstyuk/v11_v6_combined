@@ -347,6 +347,41 @@ class MultiStrategyRunner:
         self._log.info(
             f"RUNNER: Seeded {len(bars)} bars on {pair_name}")
 
+    def rebind_orb_connections(self) -> None:
+        """Re-point every engine that exposes `rebind_ib` at the
+        current `IBKRConnection.ib` instance.
+
+        Called from V11LiveTrader.run() immediately after a reconnect
+        is detected, BEFORE position reconciliation, so the
+        reconcile_after_reconnect path runs against the live socket.
+
+        Non-ORB engines (Darvas, LevelRetest) use TradeManager which
+        reads `conn.ib` lazily through the connection — they don't
+        cache an ib handle at construction and don't need rebinding.
+        See Phase 1 of docs/superpowers/reviews/2026-05-11-v11-orb-
+        remediation-plan-reviewer-reply.md.
+        """
+        rebound: list = []
+        for engine in self._engines:
+            if not hasattr(engine, "rebind_ib"):
+                continue
+            pair = getattr(engine, "pair_name", None)
+            contract = self._conn._contracts.get(pair) if pair else None
+            if contract is None:
+                self._log.warning(
+                    f"rebind_orb_connections: no qualified contract for "
+                    f"{pair!r} -- skipping rebind")
+                continue
+            try:
+                engine.rebind_ib(self._conn.ib, contract)
+                rebound.append(pair)
+            except Exception as e:
+                self._log.error(
+                    f"rebind_orb_connections({pair}) raised: {e}")
+        if rebound:
+            self._log.info(
+                f"RUNNER: rebound ORB engines after reconnect: {rebound}")
+
     def reset_daily(self) -> None:
         """Reset daily counters and detector state at session boundary.
 

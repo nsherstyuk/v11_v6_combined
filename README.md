@@ -1,8 +1,46 @@
-# IBKR + Grok Swing Trading Agent
+# IBKR + Grok Swing Trading Agent — LEGACY / PROTOTYPE
+
+> **2026-05-10 status:** This original swing-agent (root `main.py` +
+> Grok stock picker) is **legacy / prototype**. It is no longer the
+> active trading path and should not be developed toward real money.
+> Key gaps: Grok picks all trades directly, no broker-side bracket
+> lifecycle, no robust exit management, no proven mechanical edge.
+> See `docs/superpowers/reviews/2026-05-10-project-direction-review.md`
+> for the full assessment.
+>
+> **Active path is `v11/`** — XAUUSD ORB only (paper, port 4002), with
+> the V6 ORB adapter. Start with `CLAUDE.md` and the "Current state"
+> section of `docs/PROJECT_STATUS.md`. The setup instructions below
+> describe the historical swing-agent prototype and remain accurate
+> for that subsystem only.
+
+---
 
 Fully automated swing-trading agent that connects to **Interactive Brokers (IBKR)**, pulls live market data, sends it to **Grok (xAI)** for intelligent trade decisions, and places orders automatically.
 
 > **Paper trading is ON by default.** No real money is at risk until you explicitly change the configuration.
+
+---
+
+## Where to start
+
+This README describes the **original swing-agent** (Project 1 in
+`docs/PROJECT_STATUS.md`). The repo now also contains the **v11
+multi-strategy trading system** under `v11/`, which is the active
+focus. For current state across all projects, see:
+
+- **`docs/PROJECT_STATUS.md`** — living status doc, refreshed at
+  session end. The "Current state" section at the top is the source
+  of truth for what's running and what's in flight.
+- **`CLAUDE.md`** — session-bootstrap entry point for AI agents
+  working in this repo (and a useful orientation read for humans too).
+- **`docs/workflow.md`** — how work happens in this repo
+  (self-review discipline, plans/reviews/specs).
+- **`docs/journal/`** — per-session record of what changed and why.
+
+The original swing-agent setup instructions below remain accurate
+for that subsystem. The Mac migration (active 2026-05) lives in
+`docs/ops/MIGRATION_STATUS.md`.
 
 ---
 

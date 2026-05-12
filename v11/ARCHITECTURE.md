@@ -1,6 +1,39 @@
 # V11 Architecture — Center/Edge Map
 
-## Center Elements (protect — changes require explicit approval)
+> **2026-05-10:** Added explicit "active vs latent capability"
+> distinction. The tables below are the codebase's full center/edge
+> map; the "Currently active center" subsection at the top names
+> the elements that are actually load-bearing for production today.
+> See `docs/superpowers/reviews/2026-05-10-project-direction-review.md`
+> for the assessment that drove this distinction and `CLAUDE.md` for
+> the protected-paths rule.
+
+## Currently active center (production load-bearing 2026-05-10)
+
+The active production strategy is **XAUUSD ORB** via the V6 adapter.
+Darvas, EURUSD, 4H Level Retest, and LLM-as-trade-gate are present in
+the codebase but suspended or disabled-by-default. The currently
+load-bearing center elements are:
+
+| Element | Why | Location |
+|---|---|---|
+| V6 ORB strategy state machine | Range formation, breakout detection, stale-breakout guard | `v11/v6_orb/orb_strategy.py` |
+| V6 ORB IBKR executor | Real money. Bracket placement, stuck-detection, exit lifecycle | `v11/v6_orb/ibkr_executor.py` |
+| ORB adapter | Wires V6 (frozen) into the V11 multi-strategy runner; handles reconnection-class failures the frozen code doesn't | `v11/live/orb_adapter.py` |
+| Bracket order semantics | Entry + SL + TP atomicity. Wrong = naked positions | `v11/v6_orb/ibkr_executor.py`, `v11/execution/trade_manager.py` |
+| Position reconciliation after reconnect | Prevents drift between broker truth and internal state | `v11/execution/ibkr_connection.py`, test at `v11/tests/test_reconcile_after_reconnect.py` |
+| IBKRConnection reconnect logic | Broker session continuity across Gateway restarts | `v11/execution/ibkr_connection.py` |
+| Safety limits | Daily trade cap, daily loss limit | `v11/config/live_config.py` |
+| Core types | Shared data contracts | `v11/core/types.py` |
+
+The IBC + Gateway supervision layer (outside `v11/`) is also part of
+the production safety surface: `~/Library/LaunchAgents/com.ibc.gateway.plist`
+(KeepAlive supervisor) and `com.nick.daily-restart.plist` (01:15 EDT
+deterministic reset cron driving `docs/agents/scripts/daily_restart.sh`).
+See `docs/journal/2026-05-10_daily_restart_architecture.md` and
+`docs/ops/IBC_TEST_PLAN.md` for the full chain.
+
+## Center Elements (codebase capability — protect — changes require explicit approval)
 
 | Element | Why | Location |
 |---|---|---|
@@ -39,3 +72,6 @@
 | `LevelRetestEngine` | 4H level retest signal pipeline: levels + retest + SMA + volume + LLM | `on_bar(bar) -> None` |
 | `MultiStrategyRunner` | Strategy registration, feed routing, shared infrastructure | `on_bar(pair, bar)`, `add_*_strategy()` |
 | `InstrumentFeed` | Shared bar aggregation per instrument, routes bars to strategies | `on_price(price, now) -> Optional[Bar]`, `on_bar(bar)` |
+| `OrbStrategy` (V6) | Range / breakout / stale-breakout state machine. Frozen — the V11 wrapper handles cases V6 alone doesn't (e.g. extended Gateway outages) | `v11/v6_orb/orb_strategy.py` |
+| `IbkrExecutor` (V6) | V6's broker interface: bracket orders, stuck-detection, exit-on-target | `v11/v6_orb/ibkr_executor.py` |
+| `OrbAdapter` | Glue between V6 (frozen) and V11's multi-strategy runner. Handles connectivity-class failures via the V11 reconnect logic. Center because it owns the live decisions about whether V6 should trade now. | `v11/live/orb_adapter.py` |

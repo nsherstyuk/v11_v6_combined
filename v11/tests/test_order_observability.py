@@ -107,12 +107,22 @@ def test_orders_use_tif_day_not_gtd():
 # ── Fix 1b: STP orders use triggerMethod=7 (2026-04-24 incident) ───────────
 
 
-def test_entry_stops_use_trigger_method_7():
-    """Regression for 2026-04-24: IBKR paper XAUUSD streams bid/ask only
-    (zero `last` prints). Default triggerMethod=0 waits on `last` and
-    never fires. Method 7 ('last or double-bid/ask') falls back to
-    bid/ask when last is absent, which is the only way STP entries
-    fire on paper XAU."""
+def test_entry_stops_use_stp_lmt_with_trigger_method_7():
+    """Regression covering two compounding issues:
+
+    (1) 2026-04-24: IBKR paper XAUUSD streams bid/ask only (zero `last`
+        prints). Default triggerMethod=0 waits on `last` and never fires.
+        Method 7 ('last or double-bid/ask') falls back to bid/ask when
+        last is absent.
+
+    (2) 2026-05-11: triggerMethod=7 alone was not sufficient to produce
+        a fill on paper — same no-fill symptom as 2026-04-24 recurred.
+        Switched orderType STP → STP LMT, which gives the post-trigger
+        order an explicit price envelope (lmtPrice = auxPrice ± buffer,
+        buffer scales with range_width).
+
+    Test verifies the post-2026-05-11 contract: STP LMT, triggerMethod=7,
+    lmtPrice set with a buffer relative to auxPrice."""
     ib = _mock_ib()
     placed_orders = []
     def _placeOrder(contract, order):
@@ -128,15 +138,35 @@ def test_entry_stops_use_trigger_method_7():
         on_fill_callback=lambda f: None,
         trade_end_hour=16, price_decimals=2, dry_run=False, logger=log,
     )
-    ok = ex.set_orb_brackets(_range(), rr_ratio=2.5)
+    ri = _range()  # high=2660, low=2650, width=10
+    ok = ex.set_orb_brackets(ri, rr_ratio=2.5)
     assert ok is True
     assert len(placed_orders) == 2
+
+    # Expected lmtPrice buffer: max(0.5, 0.1 × range_width) = max(0.5, 1.0) = 1.0
+    expected_buffer = 1.0
     for o in placed_orders:
-        assert o.orderType == "STP"
+        assert o.orderType == "STP LMT", (
+            f"Entry order must be STP LMT (got {o.orderType}). STP alone "
+            f"was insufficient — the 2026-05-11 no-fill incident showed "
+            f"that even with triggerMethod=7, plain STP on paper XAUUSD "
+            f"did not fill when bid/ask crossed the trigger by $40+.")
         assert o.triggerMethod == 7, (
-            f"STP entry order must set triggerMethod=7 (got "
-            f"{o.triggerMethod}); on paper XAUUSD, default method waits "
-            f"on `last` which never prints, so the stop never fires.")
+            f"Entry order must set triggerMethod=7 (got {o.triggerMethod}); "
+            f"on paper XAUUSD, default method waits on `last` which never "
+            f"prints, so the trigger half never fires.")
+
+    # Verify directionally-correct lmtPrice on BUY vs SELL
+    buy = next(o for o in placed_orders if o.action == "BUY")
+    sell = next(o for o in placed_orders if o.action == "SELL")
+    assert buy.auxPrice == ri.high
+    assert buy.lmtPrice == ri.high + expected_buffer, (
+        f"BUY STP LMT lmtPrice must be auxPrice + buffer (got "
+        f"{buy.lmtPrice}, expected {ri.high + expected_buffer})")
+    assert sell.auxPrice == ri.low
+    assert sell.lmtPrice == ri.low - expected_buffer, (
+        f"SELL STP LMT lmtPrice must be auxPrice - buffer (got "
+        f"{sell.lmtPrice}, expected {ri.low - expected_buffer})")
 
 
 def test_sl_order_uses_trigger_method_7():

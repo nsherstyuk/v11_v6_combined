@@ -390,6 +390,20 @@ class ORBAdapter:
 
     # ── Fill callback (from V6 execution engine) ──────────────────
 
+    # Exit reasons emitted by IBKRExecutionEngine. V6's frozen
+    # ORBStrategy.on_fill() only handles {SL, TP, MARKET, BE} — it
+    # leaves state == IN_TRADE for everything else. The adapter
+    # converges state for the remaining defensive reasons so a
+    # safety-flatten doesn't strand the strategy/risk-manager view
+    # out of sync with the broker (Phase 2, 2026-05-11 remediation).
+    EXIT_REASONS = frozenset((
+        "SL", "TP", "BE", "MARKET",
+        "CLOSED", "ORPHAN_FLATTEN", "NAKED_FLATTEN",
+    ))
+    SAFETY_FLATTEN_REASONS = frozenset((
+        "CLOSED", "ORPHAN_FLATTEN", "NAKED_FLATTEN",
+    ))
+
     def _on_fill(self, fill: Fill):
         """Intercept V6 fills: forward to strategy, report to risk manager."""
         # Forward to V6 strategy (mirrors V6's LiveRunner.on_fill)
@@ -403,16 +417,50 @@ class ORBAdapter:
                 f"ORB ENTRY: {fill.direction} @ {fill.price} -- "
                 f"risk manager notified")
 
-        elif fill.reason in ("SL", "TP", "BE", "MARKET", "CLOSED"):
-            pnl_price = self._calc_pnl(fill.price)
-            pnl_usd = round(
-                pnl_price * self._v6_config.qty * self._v6_config.point_value,
-                2)
+        elif fill.reason in self.EXIT_REASONS:
+            s = self._strategy
+            # Safety-flatten paths (ORPHAN_FLATTEN, NAKED_FLATTEN, and the
+            # CLOSED "position vanished" fallback) can fire when the V6
+            # strategy was never aware of an entry — e.g. the executor
+            # adopted a broker-side orphan during reconcile_after_reconnect.
+            # In that case entry_price/direction are unset and the naive
+            # _calc_pnl returns price (LONG: exit - 0 = exit). Guard
+            # against the bogus number.
+            if s.entry_price == 0 or s.direction is None:
+                pnl_usd = 0.0
+                if fill.reason in self.SAFETY_FLATTEN_REASONS:
+                    self._log.warning(
+                        f"ORB {fill.reason}: no entry basis "
+                        f"(entry_price={s.entry_price}, "
+                        f"direction={s.direction}) -- recording PnL=$0.00")
+                else:
+                    self._log.warning(
+                        f"ORB {fill.reason}: unexpected missing entry "
+                        f"basis on a non-safety exit -- recording PnL=$0.00")
+            else:
+                pnl_price = self._calc_pnl(fill.price)
+                pnl_usd = round(
+                    pnl_price * self._v6_config.qty * self._v6_config.point_value,
+                    2)
+
             self._risk_manager.record_trade_exit(
                 self._instrument, self.STRATEGY_NAME, pnl_usd)
             self._log.info(
                 f"ORB EXIT: {fill.reason} @ {fill.price} "
                 f"PnL=${pnl_usd:+.2f} -- risk manager notified")
+
+            # V6 on_fill() above already sets state to DONE_TODAY for
+            # SL/TP/MARKET/BE. For CLOSED/ORPHAN_FLATTEN/NAKED_FLATTEN
+            # it leaves state untouched (frozen V6 code ignores them),
+            # so the adapter forces the transition here. Without this,
+            # the strategy can sit IN_TRADE after a safety-flatten and
+            # block future trades / produce misleading status lines.
+            if fill.reason in self.SAFETY_FLATTEN_REASONS:
+                if s.state != StrategyState.DONE_TODAY:
+                    self._log.info(
+                        f"ORB state: {s.state.value} -> DONE_TODAY "
+                        f"(forced by {fill.reason})")
+                    s.state = StrategyState.DONE_TODAY
 
             # Auto-assess ORB decision
             self._assess_exit(fill, pnl_usd)
@@ -710,6 +758,91 @@ class ORBAdapter:
         if self._execution.has_position():
             self._execution.close_at_market()
         self._context.disconnect()
+
+    def rebind_ib(self, ib, contract) -> None:
+        """Re-point ORB components at a new IB() instance after reconnect.
+
+        IBKRConnection.connect() executes `self.ib = IB()` so any handle
+        captured at ORB construction is left on a stale, disconnected
+        socket. Without a rebind, post-reconnect calls to placeOrder,
+        positions, openTrades, cancelOrder, and reconcile_after_reconnect
+        all run against a dead instance. Fill detection silently stops.
+
+        This method swaps the live ib + contract through every ORB-owned
+        component and re-establishes the V6 tick subscription (which
+        cached its own ticker/listener on the old ib). The next
+        set_orb_brackets call will re-hook orderStatusEvent on the new
+        ib via the executor's idempotent hook flag.
+
+        Phase 1, 2026-05-11 remediation. Verified architectural bug:
+        v11/execution/ibkr_connection.py:77 `self.ib = IB()`.
+        """
+        self._log.info(
+            "ORB: rebinding to new IBKR connection after reconnect")
+
+        # Best-effort unhook of the old listener. The old ib is already
+        # disconnected so this is mostly cosmetic, but leaving a stale
+        # closure registered on a defunct event object is sloppy.
+        try:
+            self._context.ib.pendingTickersEvent -= (
+                self._context._on_ticker_update)
+        except Exception:
+            pass
+
+        # Swap the held ib + contract on every V6 component. The V6
+        # classes are otherwise frozen; we mutate their attributes
+        # rather than adding methods to them.
+        self._ib = ib
+        self._contract = contract
+        self._context.ib = ib
+        self._context.contract = contract
+        self._execution.ib = ib
+        self._execution.contract = contract
+
+        # Re-establish the tick subscription on the new ib. The cached
+        # self._context.ticker references an object owned by the old
+        # ib_insync.IB instance and will never emit again.
+        try:
+            self._context.ticker = ib.reqMktData(contract, '', False, False)
+        except Exception as e:
+            self._log.error(f"ORB rebind: reqMktData failed: {e}")
+        try:
+            ib.pendingTickersEvent += self._context._on_ticker_update
+        except Exception as e:
+            self._log.error(f"ORB rebind: re-hook pendingTickersEvent: {e}")
+
+        # Reset the executor's status-event hook flag so the next
+        # set_orb_brackets() call re-hooks orderStatusEvent on the
+        # new ib. The flag is idempotent guard; flipping it back to
+        # False is the contract for "we need to hook again."
+        self._execution._hooked_status_event = False
+
+    def emergency_close(self, reason: str) -> None:
+        """Emergency-shutdown ORB close. Always attempts broker-truth
+        flatten, even if internal `_position` says flat.
+
+        The executor's `close_at_market()` is already broker-truth-aware:
+        when internal state is flat it queries ib.positions() and
+        flattens any orphan found. This method exists so the emergency
+        shutdown path (V11LiveTrader._emergency_shutdown) routes through
+        that code path regardless of internal state — without it, a
+        broker-side orphan that the strategy doesn't know about would
+        survive emergency shutdown (cancel_all_orders cancels
+        protective SL/TP, then process exits with the naked position).
+
+        Phase 3, 2026-05-11 remediation.
+        """
+        self._log.critical(f"ORB emergency_close: reason={reason}")
+        try:
+            self._execution.cancel_orb_brackets()
+        except Exception as e:
+            self._log.warning(
+                f"ORB emergency_close cancel_orb_brackets: {e}")
+        try:
+            self._execution.close_at_market()
+        except Exception as e:
+            self._log.error(
+                f"ORB emergency_close close_at_market: {e}")
 
     # ── Bar-level velocity ────────────────────────────────────────
 

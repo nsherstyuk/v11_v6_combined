@@ -15,6 +15,27 @@ Originally frozen. Modifications in this V11 copy (documented, not drift):
                 tracking. When an entry order transitions to
                 Cancelled/Inactive before filling, we log it and
                 surface it so the strategy can handle the failure.
+  - 2026-05-11: three changes after the 2026-05-11 no-fill bug
+                (docs/journal/2026-05-11_orb_no_fill_bug_and_code_review.md):
+                (B) self.buy_entry_id / self.sell_entry_id are now set
+                    BEFORE ib.sleep(1) so the orderStatusEvent listener
+                    catches early PendingSubmit/PreSubmitted/Submitted
+                    transitions — previously these fired before the IDs
+                    were recorded and were filtered out as "not ours".
+                (A) Immediately after placement, log every order at the
+                    broker via ib.openTrades(): type, action, auxPrice,
+                    lmtPrice, triggerMethod, tif, transmit, ocaGroup,
+                    status. Captures the smoking-gun data needed to
+                    debug trigger semantics on paper XAUUSD.
+                (C1) Entry orders changed from STP to STP LMT with
+                    lmtPrice = auxPrice ± buffer (buffer scales with
+                    range_width). The 2026-04-24 fix of triggerMethod=7
+                    was never validated live (Gateway-restart issue
+                    blocked it for 2 weeks), and the 2026-05-11 incident
+                    reproduces the exact same no-fill pattern. STP LMT
+                    keeps triggerMethod=7 for the trigger half and adds
+                    an explicit limit price so the post-trigger order
+                    has a defined fill envelope on paper.
 """
 import logging
 import math
@@ -146,17 +167,30 @@ class IBKRExecutionEngine(ExecutionEngine):
         # when last is absent and uses last when present; safe on both
         # paper and live. (2026-04-24 incident: BUY-STOP @ 4711.24 sat
         # resting while price traded to 4735.82 mid for ~20 min.)
+        #
+        # 2026-05-11: switched orderType STP → STP LMT (see header).
+        # lmtPrice gives an explicit price ceiling/floor on the fill
+        # leg. Buffer = max(0.5, 0.1 × range_width) — scales with
+        # volatility, never tighter than $0.50. For today's range of
+        # 57.35, buffer ≈ $5.74; for a tight 10-wide range, buffer = $1.
+        range_width = range_info.high - range_info.low
+        lmt_buffer = max(0.5, 0.1 * range_width)
+        buy_lmt = round(range_info.high + lmt_buffer, d)
+        sell_lmt = round(range_info.low - lmt_buffer, d)
+
         buy_entry = Order(
-            action="BUY", orderType="STP", totalQuantity=self.quantity,
+            action="BUY", orderType="STP LMT", totalQuantity=self.quantity,
             auxPrice=round(range_info.high, d),
+            lmtPrice=buy_lmt,
             tif="DAY", triggerMethod=7,
             ocaGroup=oca_group, ocaType=1,
             transmit=False,
         )
 
         sell_entry = Order(
-            action="SELL", orderType="STP", totalQuantity=self.quantity,
+            action="SELL", orderType="STP LMT", totalQuantity=self.quantity,
             auxPrice=round(range_info.low, d),
+            lmtPrice=sell_lmt,
             tif="DAY", triggerMethod=7,
             ocaGroup=oca_group, ocaType=1,
             transmit=True,
@@ -169,18 +203,61 @@ class IBKRExecutionEngine(ExecutionEngine):
             self._entry_failure_reason = ""
             self._hook_status_event_once()
 
+            # 2026-05-11 fix B: record orderId BEFORE ib.sleep, so the
+            # orderStatusEvent listener can recognize early-lifecycle
+            # transitions (PendingSubmit/PreSubmitted/Submitted) as
+            # "our" events. Previously the IDs were set AFTER the sleep,
+            # so the listener filtered out the very transitions we need
+            # for diagnostics.
             buy_trade = self.ib.placeOrder(self.contract, buy_entry)
-            self.ib.sleep(1)
             self.buy_entry_id = buy_trade.order.orderId
+            self.ib.sleep(1)
 
             sell_trade = self.ib.placeOrder(self.contract, sell_entry)
-            self.ib.sleep(1)
             self.sell_entry_id = sell_trade.order.orderId
+            self.ib.sleep(1)
 
             self.logger.info(
                 f"Entry stops placed: BUY id={self.buy_entry_id} "
-                f"@ {range_info.high:.{d}f}, SELL id={self.sell_entry_id} "
-                f"@ {range_info.low:.{d}f} (OCA={oca_group})")
+                f"@ {range_info.high:.{d}f} lmt={buy_lmt:.{d}f}, "
+                f"SELL id={self.sell_entry_id} "
+                f"@ {range_info.low:.{d}f} lmt={sell_lmt:.{d}f} "
+                f"(OCA={oca_group})")
+
+            # 2026-05-11 fix A: post-placement diagnostic. Query the
+            # broker for the actual order state after placement settles.
+            # This captures whether IBKR received the order with the
+            # attributes we sent (orderType, auxPrice, lmtPrice,
+            # triggerMethod, transmit, oca, status). Logs everything
+            # for the contract so we see the OCA pair's joint state.
+            try:
+                diag_lines = []
+                for tr in self.ib.openTrades():
+                    if (hasattr(tr.contract, 'conId')
+                            and tr.contract.conId == self.contract.conId):
+                        o = tr.order
+                        s = tr.orderStatus
+                        diag_lines.append(
+                            f"    id={o.orderId} {o.action} {o.orderType} "
+                            f"aux={getattr(o, 'auxPrice', 'N/A')} "
+                            f"lmt={getattr(o, 'lmtPrice', 'N/A')} "
+                            f"trigger={getattr(o, 'triggerMethod', 'N/A')} "
+                            f"tif={o.tif} transmit={o.transmit} "
+                            f"oca={o.ocaGroup} ocaType={o.ocaType} "
+                            f"status={s.status} "
+                            f"filled={s.filled}/{s.remaining}")
+                if diag_lines:
+                    self.logger.info(
+                        "DIAG: openTrades after placement:\n"
+                        + "\n".join(diag_lines))
+                else:
+                    self.logger.warning(
+                        "DIAG: openTrades returned no entries for our "
+                        "contract — order may not be live on IBKR side")
+            except Exception as diag_e:
+                self.logger.warning(
+                    f"DIAG: openTrades query failed: {diag_e}")
+
             self._consec_placement_conn_failures = 0
             return True
         except Exception as e:

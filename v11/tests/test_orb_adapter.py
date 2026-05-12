@@ -773,3 +773,149 @@ class TestBarTickCountEnrichment:
         assert len(adapter._bar_buffer) == 1
         assert adapter._bar_buffer[0].tick_count == 60
         adapter._ib.reqHistoricalDataAsync.assert_not_called()
+
+
+# ── 13. Safety-flatten exit-reason convergence (Phase 2, 2026-05-11) ─────────
+
+class TestSafetyFlattenConvergence:
+    """V6's frozen ORBStrategy.on_fill() only handles SL/TP/MARKET/BE.
+    The adapter is responsible for converging state for the remaining
+    exit reasons emitted by IBKRExecutionEngine: CLOSED (position
+    vanished), ORPHAN_FLATTEN (post-reconnect orphan), NAKED_FLATTEN
+    (post-entry invariant tripped). Without that, the strategy can
+    stay IN_TRADE while the broker is flat and the risk manager still
+    thinks XAUUSD has a position. (Reviewer plan Phase 2.)"""
+
+    def _setup_in_trade(self, adapter, risk_manager,
+                        direction="LONG", entry_price=2660.0):
+        """Common setup for tests that exit from an active position."""
+        adapter._strategy.state = StrategyState.IN_TRADE
+        adapter._strategy.direction = direction
+        adapter._strategy.entry_price = entry_price
+        adapter._strategy.range = RangeInfo(
+            high=2660.0, low=2650.0, start_time=None, end_time=None)
+        risk_manager.record_trade_entry("XAUUSD", "V6_ORB")
+
+    def test_orphan_flatten_clears_risk_manager_and_sets_done(
+            self, adapter, risk_manager):
+        """ORPHAN_FLATTEN must close the risk-manager position AND
+        force strategy to DONE_TODAY. V6 ignores this reason."""
+        self._setup_in_trade(adapter, risk_manager)
+
+        fill = Fill(
+            timestamp=_ts(11, 0),
+            price=2658.0,
+            direction="SHORT",
+            reason="ORPHAN_FLATTEN",
+        )
+        adapter._on_fill(fill)
+
+        assert not risk_manager.is_instrument_in_trade("XAUUSD")
+        assert adapter._strategy.state == StrategyState.DONE_TODAY
+
+    def test_naked_flatten_clears_risk_manager_and_sets_done(
+            self, adapter, risk_manager):
+        """NAKED_FLATTEN fires from the per-tick invariant when a
+        position is held without an active SL+TP. Must converge."""
+        self._setup_in_trade(adapter, risk_manager)
+
+        fill = Fill(
+            timestamp=_ts(11, 0),
+            price=2655.0,
+            direction="SHORT",
+            reason="NAKED_FLATTEN",
+        )
+        adapter._on_fill(fill)
+
+        assert not risk_manager.is_instrument_in_trade("XAUUSD")
+        assert adapter._strategy.state == StrategyState.DONE_TODAY
+
+    def test_closed_forces_done_today(self, adapter, risk_manager):
+        """CLOSED is the 'position vanished without detected SL/TP fill'
+        fallback. V6 ignores it; adapter must still flip state."""
+        self._setup_in_trade(adapter, risk_manager)
+
+        fill = Fill(
+            timestamp=_ts(11, 0),
+            price=2660.0,
+            direction="SHORT",
+            reason="CLOSED",
+        )
+        adapter._on_fill(fill)
+
+        assert not risk_manager.is_instrument_in_trade("XAUUSD")
+        assert adapter._strategy.state == StrategyState.DONE_TODAY
+
+    def test_orphan_flatten_with_no_entry_basis_records_zero_pnl(
+            self, adapter, risk_manager):
+        """If the executor adopts a broker-side orphan that the
+        strategy was never aware of (entry_price=0, direction=None),
+        the adapter must record PnL=0.0 instead of a bogus large
+        number derived from (exit_price - 0). Strategy still flips
+        to DONE_TODAY. Risk manager just needs to clear the position."""
+        # Strategy has no idea there was an entry
+        adapter._strategy.state = StrategyState.IN_TRADE
+        adapter._strategy.direction = None
+        adapter._strategy.entry_price = 0.0
+        adapter._strategy.range = RangeInfo(
+            high=2660.0, low=2650.0, start_time=None, end_time=None)
+        # But the risk manager / position tracking thinks we're in
+        risk_manager.record_trade_entry("XAUUSD", "V6_ORB")
+        starting_pnl = risk_manager.combined_pnl
+
+        fill = Fill(
+            timestamp=_ts(11, 0),
+            price=2658.0,
+            direction="SHORT",
+            reason="ORPHAN_FLATTEN",
+        )
+        adapter._on_fill(fill)
+
+        # PnL must be exactly 0.0, not (2658 - 0) * qty * point_value
+        assert risk_manager.combined_pnl == starting_pnl
+        assert not risk_manager.is_instrument_in_trade("XAUUSD")
+        assert adapter._strategy.state == StrategyState.DONE_TODAY
+
+    def test_sl_path_still_uses_v6_state_machine(
+            self, adapter, risk_manager):
+        """Regression: an ordinary SL fill must continue to flow
+        through V6's on_fill (which sets DONE_TODAY) and produce the
+        normal PnL. The adapter must not double-flip or break the
+        established path."""
+        self._setup_in_trade(adapter, risk_manager,
+                             direction="LONG", entry_price=2660.0)
+
+        fill = Fill(
+            timestamp=_ts(11, 0),
+            price=2650.0,  # SL fill below entry
+            direction="SHORT",
+            reason="SL",
+        )
+        adapter._on_fill(fill)
+
+        # PnL = (2650 - 2660) * 1 * 1.0 = -10.0
+        assert risk_manager.combined_pnl == -10.0
+        assert not risk_manager.is_instrument_in_trade("XAUUSD")
+        assert adapter._strategy.state == StrategyState.DONE_TODAY
+
+    def test_safety_flatten_logs_warning_on_missing_entry_basis(
+            self, adapter, risk_manager, caplog):
+        """The PnL-zero guard should also warn so the operator
+        knows the orphan was unattributed."""
+        adapter._strategy.state = StrategyState.IN_TRADE
+        adapter._strategy.direction = None
+        adapter._strategy.entry_price = 0.0
+        adapter._strategy.range = RangeInfo(
+            high=2660.0, low=2650.0, start_time=None, end_time=None)
+        risk_manager.record_trade_entry("XAUUSD", "V6_ORB")
+
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING,
+                             logger="test_orb_adapter"):
+            adapter._on_fill(Fill(
+                timestamp=_ts(11, 0),
+                price=2655.0,
+                direction="SHORT",
+                reason="NAKED_FLATTEN",
+            ))
+        assert any("no entry basis" in r.message for r in caplog.records)

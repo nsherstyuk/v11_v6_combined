@@ -34,6 +34,14 @@ tick_vault_data/
 # Live tick logs (large, generated at runtime)
 data/ticks/
 
+# Migrated historical data from nautilus0/data/ (315 MB total — IBKR-MID
+# FX bars + Nautilus catalog parquets). Reproducible from the Dropbox
+# source backup; should not be tracked in git. See data/README.md for
+# provenance and how to repopulate if missing.
+data/historical/
+data/catalog/
+data/test_catalog/
+
 # Claude Code worktree/session state
 .claude/
 
@@ -58,3 +66,6 @@ NYMEX_DL_NG1*.csv
 # One-off LLM transcripts dumped to repo root
 grok-chat.md
 gemini-conversation-*.md
+
+# macOS metadata
+.DS_Store
