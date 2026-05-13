@@ -75,6 +75,26 @@ structured self-review. See `docs/workflow.md` for the protocol and
 `docs/agents/` directory is preserved as historical record but is
 no longer the active coordination channel.
 
+**2026-05-13 — Phase 6 proof-of-life CLOSED. Full lifecycle live.**
+First successful XAUUSD ORB fill on Mac paper. Second consecutive
+clean unattended cron fire (01:16:28 EDT SUCCESS). Wednesday-enabled
+config loaded. Range computed at 02:00:02 EDT (4688.01–4726.99).
+04:01:05 EDT brackets placed (STP LMT, triggerMethod=7, OCA pair);
+**DIAG block confirmed every order attribute reached IBKR**. SELL
+leg filled at 05:22:34 EDT — first successful entry fill since the
+2026-04-24 no-fill bug. SHORT @ 4687.63 with SL=4726.99 and
+TP=4590.56 placed and active. Position closed at 12:00:07 EDT via
+V6 trade-window-close MARKET exit (fill 4695.59), PnL −$7.96 paper,
+state IN_TRADE → DONE_TODAY. All A+B+C1 fixes + the original
+2026-04-24 `triggerMethod=7` fix validated end-to-end live. The
+no-fill bug arc is fully resolved. Full timeline:
+`docs/journal/2026-05-13_xauusd_first_live_fill_full_lifecycle.md`.
+Phase 1/2/3 hardening (reconnect rebind, safety-flatten, emergency
+close) remain unit-tested but production-untested — wait for natural
+exercise. Morning health probe (`docs/agents/scripts/v11_morning_health.sh`)
+landed: one-line PASS/FAIL into `~/.v11_morning_health.log` for the
+daily glance check.
+
 **2026-05-12 morning operational result — every layer worked, no
 fill (correctly).** First fully-unattended overnight run since the
 Mac migration. The 01:15 EDT `com.nick.daily-restart.plist` cron
@@ -234,7 +254,8 @@ order** (post-2026-05-09 only; older history is in
 | 2026-05-11 | `docs/journal/2026-05-11_orb_us_equities_regime_change.md` | ORB analysis on the 15-ticker equity universe — no tradeable edge, edge died 2024+ |
 | 2026-05-11 | `docs/journal/2026-05-11_orb_no_fill_bug_and_code_review.md` | Today's no-fill bug + deep code review + 3 fixes applied (A + B + C1) |
 | 2026-05-11 | `docs/journal/2026-05-11_orb_remediation_phases_1_2_3_5a.md` | Phases 1–3 + 5a implemented per reviewer's revised plan. ORB reconnect rebind, safety-flatten convergence, ORB-aware emergency close, minimal fake-IB harness. +23 tests |
-| 2026-05-12 | `docs/journal/2026-05-12_overnight_watch_and_stale_breakout_skip.md` | Autonomous overnight /loop validated unattended cron + AbandonProcessGroup fix end-to-end. Range computed, trade window opened, strategy correctly skipped a stale breakout. A+B+C1 + Phase 1/2/3 remain untested live. **Read this last; latest operational state.** |
+| 2026-05-12 | `docs/journal/2026-05-12_overnight_watch_and_stale_breakout_skip.md` | Autonomous overnight /loop validated unattended cron + AbandonProcessGroup fix end-to-end. Range computed, trade window opened, strategy correctly skipped a stale breakout. A+B+C1 + Phase 1/2/3 remain untested live |
+| 2026-05-13 | `docs/journal/2026-05-13_xauusd_first_live_fill_full_lifecycle.md` | **Phase 6 proof-of-life closed.** First fill on Mac paper. Full lifecycle: cron → range → brackets (with DIAG) → fill → SL/TP → market exit at window close. PnL −$7.96 paper, plumbing perfect. **Read this last; the no-fill bug arc is fully resolved.** |
 
 For reviewer context: `docs/superpowers/reviews/2026-05-10-project-direction-review.md`
 is the authoritative project-direction document (revised twice with
