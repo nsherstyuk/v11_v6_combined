@@ -75,6 +75,25 @@ structured self-review. See `docs/workflow.md` for the protocol and
 `docs/agents/` directory is preserved as historical record but is
 no longer the active coordination channel.
 
+**2026-05-12 morning operational result — every layer worked, no
+fill (correctly).** First fully-unattended overnight run since the
+Mac migration. The 01:15 EDT `com.nick.daily-restart.plist` cron
+fired cleanly: Gateway restart in 15s, v11 launched on the new
+code (Phase 1/2/3/5a + A+B+C1) and survived past
+`daily_restart.sh` exit (the `AbandonProcessGroup` fix held under
+unattended conditions for the first time). Range computed at
+02:00:02 EDT (4708.85–4773.56). At 04:00 EDT trade window open,
+the stale-breakout guard fired: price had dropped below 4708.85
+to 4702.99 during the 02:00–04:00 gap, so brackets were correctly
+NOT placed. Strategy went `DONE_TODAY` with `skip_reason="stale
+breakout: price already below low at eval time"`. No bug — strategy
+declined a stale setup. **Practical consequence: A+B+C1 STP LMT,
+DIAG block, and the Phase 1/2/3 hardening paths remain UNTESTED
+LIVE.** Next validation point: a future trade window where price
+stays inside the 06:00 UTC range until 08:00 UTC. Full overnight
+trail: `~/.v11_overnight_watch.log` (kept). Journal:
+`docs/journal/2026-05-12_overnight_watch_and_stale_breakout_skip.md`.
+
 **Phase 6 proof-of-life — partial result 2026-05-11.** XAUUSD ORB on
 Mac paper, full lifecycle ran end-to-end for the first time:
 - Range computed correctly: 4648.21–4705.56
@@ -214,7 +233,8 @@ order** (post-2026-05-09 only; older history is in
 | 2026-05-11 | `docs/journal/2026-05-11_daily_restart_v11_pgrp_kill.md` | `AbandonProcessGroup` fix to the daily-restart plist — production-validated |
 | 2026-05-11 | `docs/journal/2026-05-11_orb_us_equities_regime_change.md` | ORB analysis on the 15-ticker equity universe — no tradeable edge, edge died 2024+ |
 | 2026-05-11 | `docs/journal/2026-05-11_orb_no_fill_bug_and_code_review.md` | Today's no-fill bug + deep code review + 3 fixes applied (A + B + C1) |
-| 2026-05-11 | `docs/journal/2026-05-11_orb_remediation_phases_1_2_3_5a.md` | Phases 1–3 + 5a implemented per reviewer's revised plan. ORB reconnect rebind, safety-flatten convergence, ORB-aware emergency close, minimal fake-IB harness. +23 tests. **Read this last; reviewer-driven architecture hardening on top of the morning's order-type fixes.** |
+| 2026-05-11 | `docs/journal/2026-05-11_orb_remediation_phases_1_2_3_5a.md` | Phases 1–3 + 5a implemented per reviewer's revised plan. ORB reconnect rebind, safety-flatten convergence, ORB-aware emergency close, minimal fake-IB harness. +23 tests |
+| 2026-05-12 | `docs/journal/2026-05-12_overnight_watch_and_stale_breakout_skip.md` | Autonomous overnight /loop validated unattended cron + AbandonProcessGroup fix end-to-end. Range computed, trade window opened, strategy correctly skipped a stale breakout. A+B+C1 + Phase 1/2/3 remain untested live. **Read this last; latest operational state.** |
 
 For reviewer context: `docs/superpowers/reviews/2026-05-10-project-direction-review.md`
 is the authoritative project-direction document (revised twice with

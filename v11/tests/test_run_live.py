@@ -98,8 +98,12 @@ class TestORBConfig:
         assert XAUUSD_ORB_CONFIG.trade_start_hour == 8
         assert XAUUSD_ORB_CONFIG.trade_end_hour == 16
 
-    def test_skip_wednesday(self):
-        assert 2 in XAUUSD_ORB_CONFIG.skip_weekdays
+    def test_skip_weekdays_empty_for_validation(self):
+        # 2026-05-12: Wednesday-skip dropped for proof-of-life
+        # validation (more trade-window opportunities while A+B+C1
+        # and Phase 1/2/3 fixes are unexercised live). Revert to
+        # (2,) once those are confirmed in production.
+        assert XAUUSD_ORB_CONFIG.skip_weekdays == ()
 
     def test_rr_ratio(self):
         assert XAUUSD_ORB_CONFIG.rr_ratio == 2.5
