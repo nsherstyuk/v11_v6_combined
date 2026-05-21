@@ -112,6 +112,41 @@ unless there's a specific structural reason.
   pre-registration record
 - `v11/backtest/orb_xauusd_mph_sweep.py` — sweep script
 
+## Appendix — 2026 YTD specifically
+
+Nick asked: "how was 2026 with the 6h and 8h guards?"
+
+| Variant | N | AvgR_slip | WR | PF |
+|---|---|---|---|---|
+| **MP4 (current live)** | **15** | **−0.025** | 40.0% | 0.94 |
+| MP6 | 26 | −0.075 | 34.6% | 0.80 |
+| MP8 | 28 | −0.082 | 35.7% | 0.77 |
+| MP12 | 28 | −0.082 | 35.7% | 0.77 |
+
+**The "extra trades" tell the story.** MP6 took 11 trades MP4
+didn't. Solving for their average R:
+
+  MP6: 26 trades × −0.075 = −1.95 total R
+  MP4: 15 trades × −0.025 = −0.375 total R
+  MP6's 11 extras averaged: (−1.95 + 0.375) / 11 = **−0.143 R**
+
+The late-window breakouts MP6 took in 2026 averaged **−0.143 R**
+— ~5.7× worse than the MP4 baseline trade. MP8's 13 extras
+averaged −0.148 R.
+
+Approximate dollar comparison (typical 2026 range ~$50):
+- MP4 actual 2026 sum_pnl: +$32 (dominated by 2026-03-03 +$186 outlier)
+- MP6 approx: ~−$45 (MP4 base + 11 extras × ~−$7 each)
+- MP8 approx: ~−$59 (MP4 base + 13 extras × ~−$7 each)
+
+**2026 specifically is the year where MP4's discipline is paying off.**
+Late-window breakouts this year have been bad. MP4 saved ~$45-60 of
+bad trades through May; today's missed +$20 phantom-fill is the
+exception, not the rule.
+
+The 4-hour cutoff is *more* important in 2026 than the long-run
+average suggests, not less.
+
 ## See also
 
 - `docs/journal/2026-05-19_first_profitable_live_trade_and_backtest_validates.md`
