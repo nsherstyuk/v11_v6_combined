@@ -526,3 +526,73 @@ def test_max_pending_hours_uses_placement_time_when_placed_after_window_open():
     )
     strategy.on_tick(tick2, ctx, exec_)
     assert strategy.state == StrategyState.DONE_TODAY
+
+
+# ── max_pending_hours resets on reconcile-driven re-place ─────────────────
+
+
+def test_max_pending_hours_resets_on_reconcile_re_place():
+    """When reconcile clears orders_placed_time (after a disconnect knocked
+    an OCA leg out of openTrades) and the strategy re-places brackets, the
+    4h-pending timer must measure from the *new* placement time — not the
+    original.
+
+    Observed 2026-05-25: four reconcile-driven re-place cycles in one day
+    on US Memorial Day with choppy IBKR connectivity. Each re-place
+    extended the effective expiry. This test locks that behavior in so a
+    future refactor that anchors the timer to 'first placement of the
+    day, ever' will be caught at test time, not by a real trade window
+    being cut short."""
+    cfg = _config()  # trade_start_hour=8, max_pending_hours=4
+    strategy = ORBStrategy(cfg, logger=log)
+    strategy.range = _range()
+    strategy.state = StrategyState.ORDERS_PLACED
+    # First placement at 09:00 UTC (1h after window open).
+    # Without re-place, max_pending would fire at 13:00 UTC.
+    strategy.orders_placed_time = datetime(2026, 5, 25, 9, 0, tzinfo=timezone.utc)
+
+    ctx = _FakeContext(strategy.range)
+    exec_ = _FakeExec()
+
+    # Tick 1 at 10:00 UTC: reconcile flags failure → fall back to RANGE_READY,
+    # orders_placed_time cleared.
+    exec_._failed = True
+    exec_._reason = "reconcile: missing orders at IBKR [124]"
+    tick_reconcile = Tick(
+        timestamp=datetime(2026, 5, 25, 10, 0, tzinfo=timezone.utc),
+        bid=2655.0, ask=2655.1,
+    )
+    strategy.on_tick(tick_reconcile, ctx, exec_)
+    assert strategy.state == StrategyState.RANGE_READY
+    assert strategy.orders_placed_time is None
+
+    # Tick 2 at 10:01 UTC: velocity ok (filter disabled in config),
+    # price in range → re-place. orders_placed_time set to new tick time.
+    tick_replace = Tick(
+        timestamp=datetime(2026, 5, 25, 10, 1, tzinfo=timezone.utc),
+        bid=2655.0, ask=2655.1,
+    )
+    strategy.on_tick(tick_replace, ctx, exec_)
+    assert strategy.state == StrategyState.ORDERS_PLACED, \
+        "Strategy must re-place on next tick after reconcile fall-back"
+    assert strategy.orders_placed_time == tick_replace.timestamp, \
+        "orders_placed_time must reset to new placement time, not retain old"
+
+    # At 13:00 UTC (first-placement+4h, second-placement+2h59m):
+    # must NOT cancel — the second placement's budget is still alive.
+    tick_old_expiry = Tick(
+        timestamp=datetime(2026, 5, 25, 13, 0, tzinfo=timezone.utc),
+        bid=2655.0, ask=2655.1,
+    )
+    strategy.on_tick(tick_old_expiry, ctx, exec_)
+    assert strategy.state == StrategyState.ORDERS_PLACED, \
+        "Must not cancel at old (first-placement) expiry — timer was reset"
+
+    # At 14:01 UTC (second-placement+4h exactly): MUST cancel.
+    tick_new_expiry = Tick(
+        timestamp=datetime(2026, 5, 25, 14, 1, tzinfo=timezone.utc),
+        bid=2655.0, ask=2655.1,
+    )
+    strategy.on_tick(tick_new_expiry, ctx, exec_)
+    assert strategy.state == StrategyState.DONE_TODAY, \
+        "Must cancel at new (second-placement) +4h expiry"

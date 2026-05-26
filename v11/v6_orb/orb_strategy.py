@@ -3,7 +3,7 @@ V6 ORBStrategy — copied from C:\\nautilus0\\v6_orb_refactor\\strategy\\orb_str
 DO NOT MODIFY — frozen V6 code. Only import paths changed.
 """
 import enum
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 import logging
 
@@ -226,6 +226,21 @@ class ORBStrategy:
                 if placed:
                     self.orders_placed_time = tick.timestamp
                     self.state = StrategyState.ORDERS_PLACED
+                    if cfg.max_pending_hours > 0:
+                        window_open = tick.timestamp.replace(
+                            hour=cfg.trade_start_hour, minute=0, second=0,
+                            microsecond=0)
+                        effective_start = max(self.orders_placed_time, window_open)
+                        expiry = effective_start + timedelta(
+                            hours=cfg.max_pending_hours)
+                        anchor = ("window_open"
+                                  if effective_start == window_open
+                                  else "placement")
+                        self.logger.info(
+                            f"max_pending expiry: {expiry:%H:%M:%S} UTC "
+                            f"(anchored to {anchor}, "
+                            f"budget={cfg.max_pending_hours}h)"
+                        )
                 else:
                     self.logger.warning(
                         "Bracket placement failed — staying RANGE_READY, "
